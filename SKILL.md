@@ -38,4 +38,4 @@ Do not store names, organizations, dates, content, or document paths in the prof
 
 ## Content boundary
 
-Formatting does not authorize inventing facts, names, organizations, dates, signatures, or colophon text. Optional document content belongs only to the current file. The skill has no field or behavior for sensitivity markings.
+Formatting does not authorize inventing facts, names, organizations, dates, signatures, or colophon text. Optional document content belongs only to the current file.
