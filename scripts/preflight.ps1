@@ -70,9 +70,19 @@ $fontStatus = foreach ($target in $targets) {
 }
 
 $renderer = $null
-foreach ($name in @('soffice', 'libreoffice', 'WINWORD')) {
+foreach ($name in @('soffice', 'libreoffice')) {
     $command = Get-Command $name -ErrorAction SilentlyContinue
     if ($command) { $renderer = $command.Source; break }
+}
+if (-not $renderer -and $env:OS -eq 'Windows_NT') {
+    try {
+        if ([type]::GetTypeFromProgID('Word.Application')) {
+            $renderer = 'microsoft_word_com'
+        }
+    }
+    catch {
+        $renderer = $null
+    }
 }
 
 [ordered]@{

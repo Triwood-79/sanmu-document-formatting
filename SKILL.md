@@ -12,8 +12,8 @@ Use this skill to create or reformat `.docx` files without Microsoft Word. Use t
 - New document: accept plain text or Markdown, then run `scripts/docx_engine.py create`.
 - Existing document: run `scripts/inspect_docx.py`, show the classification and risk summary, obtain confirmation or corrections, then run `scripts/docx_engine.py format-existing --confirmed`.
 - `查看当前排版格式`: run `scripts/profile_manager.py view`.
-- `修改排版格式`: run `profile_manager.py begin`, ask only the relevant parameter groups, apply answers with `set`, show `diff`, and save only after the user says `确认保存`.
-- `重新录入排版格式`: use `begin --fresh`, then follow the same confirmation flow.
+- `修改排版格式`: run `profile_manager.py view`, show the current values for the requested groups, run `begin`, ask only those groups, apply answers with `set`, show `diff`, and save only after the user says `确认保存`.
+- `重新录入排版格式`: run `profile_manager.py view` first and display the complete current profile in grouped, user-readable form. Then use `begin --fresh`, ask every V1-open field with its current value shown beside the question, and follow the same diff and confirmation flow. If the user chooses to keep a current value, explicitly write that value into the fresh draft so it is not reset to the built-in default.
 - `取消修改`: run `profile_manager.py cancel`.
 - `恢复通用公文预设格式`: explain that the saved customization will be disabled, obtain confirmation, then run `profile_manager.py restore`.
 
@@ -27,15 +27,18 @@ Never treat an ordinary per-document instruction as a persistent profile change.
 4. For existing files, refuse `.doc` and `.docm`. Stop on corrupt, encrypted, commented, or tracked-change documents and request a clean `.docx` copy.
 5. Never overwrite an input file. The engine creates `<stem>_排版后.docx`, adding a numeric suffix when needed.
 6. Preserve tables, pictures, text boxes, and unusual landscape sections. Report them; do not normalize their contents.
-7. Run `scripts/privacy_scrub.py` and `scripts/validate_docx.py` on every output.
-8. Use `scripts/render_docx.py` only when a supported renderer is detected. Without rendering, report structural validation only, never visual approval.
+7. V1 does not format colophons. Preserve existing colophon paragraphs unchanged; when new content contains a colophon, keep the content unformatted and tell the user to finish it manually.
+8. Run `scripts/privacy_scrub.py` and `scripts/validate_docx.py` on every output.
+9. Use `scripts/render_docx.py` only when a supported renderer is detected. Without rendering, report structural validation only, never visual approval.
 
 ## Profile questions
 
-Ask in small groups: page setup and print mode; global bold; fonts and fallbacks; title hierarchy; body/reference/description/colophon; page numbers. Keep a draft until explicit confirmation and show a current-to-proposed diff first.
+Ask in small groups: margins and print mode; global bold; fonts and fallbacks; title hierarchy; body/reference/description; page-number font, size, and bold. Show the current value whenever asking for a replacement value.
+
+Fixed line spacing is an explicit V1 question, not an inferred value. Ask separately for the main title and for every other paragraph role: heading 1, heading 2, body, reference note, and description. The user may answer with one shared value for several roles; expand it to each affected field. Keep a draft until explicit confirmation and show a current-to-proposed diff first. Do not offer fields that are fixed in V1.
 
 Do not store names, organizations, dates, content, or document paths in the profile. Read [references/privacy-and-release.md](references/privacy-and-release.md) before packaging or publishing the skill.
 
 ## Content boundary
 
-Formatting does not authorize inventing facts, names, organizations, dates, signatures, or colophon text. Optional document content belongs only to the current file.
+Formatting does not authorize inventing facts, names, organizations, dates, signatures, or other document content. Optional document content belongs only to the current file.

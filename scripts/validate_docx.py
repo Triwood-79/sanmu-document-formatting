@@ -7,10 +7,11 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
+from lxml import etree
 
 from common import active_profile, read_json
-from inspect_docx import classify_paragraphs
 
 
 STYLE_ROLES = {
@@ -20,8 +21,16 @@ STYLE_ROLES = {
     "ODF Body": "body",
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
-    "ODF Colophon": "colophon",
+    "ODF Colophon": "skip",
 }
+ROLE_STYLES = {role: style for style, role in STYLE_ROLES.items() if role != "skip"}
+ALIGNMENTS = {
+    "left": WD_ALIGN_PARAGRAPH.LEFT,
+    "center": WD_ALIGN_PARAGRAPH.CENTER,
+    "right": WD_ALIGN_PARAGRAPH.RIGHT,
+    "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+}
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 FONT_ALIASES = {
     "黑体": {"SimHei"},
     "楷体_GB2312": {"楷体GB2312", "KaiTi_GB2312", "KaiTi"},
@@ -41,6 +50,12 @@ def validate_paragraph(paragraph, index: int, role: str, spec: dict, global_bold
     line_rule = spacing.get(qn("w:lineRule")) if spacing is not None else None
     if line_rule != "exact" or not near(line, spec["line_spacing_pt"], 0.01):
         errors.append(f"Paragraph {index} ({role}) has incorrect exact line spacing")
+    space_before = paragraph.paragraph_format.space_before
+    before_pt = space_before.pt if space_before is not None else 0
+    if not near(before_pt, spec["space_before_pt"], 0.01):
+        errors.append(f"Paragraph {index} ({role}) has incorrect space before")
+    if paragraph.alignment != ALIGNMENTS[spec["alignment"]]:
+        errors.append(f"Paragraph {index} ({role}) has incorrect alignment")
     ind = p_pr.ind if p_pr is not None else None
     chars = int(ind.get(qn("w:firstLineChars"))) / 100 if ind is not None and ind.get(qn("w:firstLineChars")) else 0
     if not near(chars, spec["first_line_chars"], 0.01):
@@ -51,18 +66,23 @@ def validate_paragraph(paragraph, index: int, role: str, spec: dict, global_bold
         if not near(size, spec["size_pt"], 0.01):
             errors.append(f"Paragraph {index} ({role}) has incorrect font size")
             break
-        if global_bold and run.font.bold is not True:
-            errors.append(f"Paragraph {index} ({role}) is not fully bold")
+        if run.font.bold is not global_bold:
+            errors.append(f"Paragraph {index} ({role}) has incorrect bold setting")
             break
         r_pr = run._element.rPr
         east_asia = r_pr.rFonts.get(qn("w:eastAsia")) if r_pr is not None and r_pr.rFonts is not None else None
+        ascii_font = r_pr.rFonts.get(qn("w:ascii")) if r_pr is not None and r_pr.rFonts is not None else None
+        hansi_font = r_pr.rFonts.get(qn("w:hAnsi")) if r_pr is not None and r_pr.rFonts is not None else None
         allowed_fonts = {spec["font_cn"], spec["font_fallback"]} | FONT_ALIASES.get(spec["font_fallback"], set())
         if east_asia not in allowed_fonts:
             errors.append(f"Paragraph {index} ({role}) has an unexpected East Asian font")
             break
+        if ascii_font != spec["font_latin"] or hansi_font != spec["font_latin"]:
+            errors.append(f"Paragraph {index} ({role}) has an unexpected Latin font")
+            break
 
 
-def validate_document(path: Path, profile: dict | None = None) -> dict:
+def validate_document(path: Path, profile: dict | None = None, classifications: list[dict] | None = None) -> dict:
     path = path.expanduser().resolve()
     errors: list[str] = []
     warnings: list[str] = []
@@ -88,28 +108,67 @@ def validate_document(path: Path, profile: dict | None = None) -> dict:
         for key, expected in margins.items():
             if not near(values[key], expected):
                 errors.append(f"Section {number} has incorrect {key} margin")
+        if not near(section.page_width.mm, 210, 0.1) or not near(section.page_height.mm, 297, 0.1):
+            errors.append(f"Section {number} is not A4 portrait size")
 
-    inferred = classify_paragraphs(document)
-    for item in inferred:
-        styled_role = STYLE_ROLES.get(document.paragraphs[item["index"]].style.name)
-        if styled_role:
-            item["role"] = styled_role
-        role = item["role"]
+    expected_roles = (
+        {item["index"]: item["role"] for item in classifications}
+        if classifications is not None
+        else {index: STYLE_ROLES.get(paragraph.style.name) for index, paragraph in enumerate(document.paragraphs)}
+    )
+    for index, paragraph in enumerate(document.paragraphs):
+        role = expected_roles.get(index)
         if role in profile["styles"]:
+            if classifications is not None and paragraph.style.name != ROLE_STYLES[role]:
+                errors.append(f"Paragraph {index} ({role}) is missing its managed style")
             validate_paragraph(
-                document.paragraphs[item["index"]],
-                item["index"],
+                paragraph,
+                index,
                 role,
                 profile["styles"][role],
                 profile["global"]["bold"],
                 errors,
             )
+        elif paragraph.text.strip():
+            warnings.append(f"Paragraph {index} was preserved without managed formatting")
 
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
-        footer_xml = b"".join(archive.read(name) for name in names if name.startswith("word/footer") and name.endswith(".xml"))
+        footer_parts = [archive.read(name) for name in names if name.startswith("word/footer") and name.endswith(".xml")]
+        footer_xml = b"".join(footer_parts)
         if b"PAGE" not in footer_xml:
             errors.append("PAGE field is missing from the footer")
+        page_spec = profile["page_number"]
+        footer_alignments: set[str] = set()
+        for data in footer_parts:
+            root = etree.fromstring(data)
+            field = root.find(".//w:fldSimple", namespaces={"w": W_NS})
+            if field is None or "PAGE" not in field.get(qn("w:instr"), ""):
+                continue
+            text = "".join(root.xpath(".//w:t/text()", namespaces={"w": W_NS}))
+            if text != "— 1 —":
+                errors.append("Page-number decoration is incorrect")
+            paragraph = root.find(".//w:p", namespaces={"w": W_NS})
+            jc = paragraph.find("./w:pPr/w:jc", namespaces={"w": W_NS}) if paragraph is not None else None
+            if jc is not None:
+                footer_alignments.add(jc.get(qn("w:val"), ""))
+            r_pr = field.find(".//w:rPr", namespaces={"w": W_NS})
+            r_fonts = r_pr.find("./w:rFonts", namespaces={"w": W_NS}) if r_pr is not None else None
+            east_asia = r_fonts.get(qn("w:eastAsia")) if r_fonts is not None else None
+            allowed_page_fonts = {page_spec["font_cn"], page_spec["font_fallback"]} | FONT_ALIASES.get(page_spec["font_fallback"], set())
+            if east_asia not in allowed_page_fonts:
+                errors.append("Page number has an unexpected font")
+            size = r_pr.find("./w:sz", namespaces={"w": W_NS}) if r_pr is not None else None
+            actual_half_points = int(size.get(qn("w:val"))) if size is not None and size.get(qn("w:val")) else None
+            if actual_half_points != round(page_spec["size_pt"] * 2):
+                errors.append("Page number has an incorrect font size")
+            bold = r_pr.find("./w:b", namespaces={"w": W_NS}) if r_pr is not None else None
+            actual_bold = bold is not None and bold.get(qn("w:val"), "1") not in {"0", "false", "off"}
+            if actual_bold is not page_spec["bold"]:
+                errors.append("Page number has an incorrect bold setting")
+        expected_alignments = {"right", "left"} if profile["page"]["print_mode"] == "duplex" else {"center"}
+        if not expected_alignments.issubset(footer_alignments):
+            errors.append("Page-number footer alignment is incorrect")
         settings = archive.read("word/settings.xml") if "word/settings.xml" in names else b""
         if profile["page"]["print_mode"] == "duplex" and b"evenAndOddHeaders" not in settings:
             errors.append("Duplex mode is missing even/odd footer settings")

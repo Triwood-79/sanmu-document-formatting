@@ -14,8 +14,7 @@
     "heading2": {"font_cn": "方正楷体_GBK", "font_fallback": "楷体_GB2312", "font_latin": "Times New Roman", "size_pt": 16, "alignment": "justify", "first_line_chars": 2, "line_spacing_pt": 30, "space_before_pt": 0},
     "body": {"font_cn": "方正仿宋_GBK", "font_fallback": "仿宋_GB2312", "font_latin": "Times New Roman", "size_pt": 16, "alignment": "justify", "first_line_chars": 2, "line_spacing_pt": 30, "space_before_pt": 0},
     "reference_note": {"font_cn": "方正楷体_GBK", "font_fallback": "楷体_GB2312", "font_latin": "Times New Roman", "size_pt": 15, "alignment": "justify", "first_line_chars": 2, "line_spacing_pt": 30, "space_before_pt": 0},
-    "description": {"font_cn": "方正楷体_GBK", "font_fallback": "楷体_GB2312", "font_latin": "Times New Roman", "size_pt": 16, "alignment": "center", "first_line_chars": 0, "line_spacing_pt": 35, "space_before_pt": 0},
-    "colophon": {"font_cn": "方正仿宋_GBK", "font_fallback": "仿宋_GB2312", "font_latin": "Times New Roman", "size_pt": 16, "alignment": "justify", "first_line_chars": 0, "line_spacing_pt": 30, "space_before_pt": 0}
+    "description": {"font_cn": "方正楷体_GBK", "font_fallback": "楷体_GB2312", "font_latin": "Times New Roman", "size_pt": 16, "alignment": "center", "first_line_chars": 0, "line_spacing_pt": 35, "space_before_pt": 0}
   },
   "page_number": {
     "font_cn": "宋体", "font_fallback": "SimSun", "size_pt": 14, "bold": true,

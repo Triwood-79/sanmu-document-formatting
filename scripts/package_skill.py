@@ -44,7 +44,7 @@ def main() -> None:
     parser.add_argument("--deny", action="append", default=[])
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
-    output = Path(args.output).expanduser().resolve() if args.output else root.parent / "dist" / f"{root.name}.zip"
+    output = Path(args.output).expanduser().resolve() if args.output else root / "dist" / f"{root.name}.zip"
     result = package(root, output, args.deny)
     print(json.dumps(result, ensure_ascii=False, indent=2))
     raise SystemExit(0 if result["created"] else 1)

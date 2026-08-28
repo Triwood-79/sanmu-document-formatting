@@ -22,7 +22,7 @@ STYLE_ROLES = {
     "ODF Body": "body",
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
-    "ODF Colophon": "colophon",
+    "ODF Colophon": "skip",
 }
 
 
@@ -103,8 +103,11 @@ def inspect_document(path: Path) -> dict:
         drawing_count = xml.count(b"<w:drawing") + xml.count(b"<w:pict")
         textbox_count = xml.count(b"<w:txbxContent")
     landscape_sections = sum(1 for section in document.sections if section.orientation == WD_ORIENT.LANDSCAPE)
+    legacy_colophon_count = sum(1 for paragraph in document.paragraphs if paragraph.style.name == "ODF Colophon")
     if landscape_sections:
         warnings.append("Landscape sections will be preserved and will not receive portrait page settings")
+    if legacy_colophon_count:
+        warnings.append("Colophon formatting is not supported in V1; detected colophon paragraphs will be preserved unchanged")
     if document.tables or drawing_count or textbox_count:
         warnings.append("Complex elements will be preserved without internal reformatting")
 
@@ -122,6 +125,7 @@ def inspect_document(path: Path) -> dict:
             "drawings": drawing_count,
             "textboxes": textbox_count,
             "landscape_sections": landscape_sections,
+            "unsupported_colophon_paragraphs": legacy_colophon_count,
             "classification_counts": counts,
         },
         "classifications": classifications,

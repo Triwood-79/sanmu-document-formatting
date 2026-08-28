@@ -14,7 +14,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt
 
-from common import active_profile, choose_output_path, read_json
+from common import active_profile, choose_output_path, read_json, unique_output_path
 from inspect_docx import classify_paragraphs, inspect_document
 from privacy_scrub import scrub_docx
 from validate_docx import validate_document
@@ -27,7 +27,6 @@ ROLE_NAMES = {
     "body": "ODF Body",
     "reference_note": "ODF Reference Note",
     "description": "ODF Description",
-    "colophon": "ODF Colophon",
 }
 ALIGNMENTS = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -207,8 +206,9 @@ def add_page_field(paragraph, spec: dict, font_name: str) -> None:
     for attr in ("eastAsia", "ascii", "hAnsi", "cs"):
         r_fonts.set(qn(f"w:{attr}"), font_name)
     r_pr.append(r_fonts)
-    bold = OxmlElement("w:b")
-    r_pr.append(bold)
+    if spec["bold"]:
+        bold = OxmlElement("w:b")
+        r_pr.append(bold)
     size = OxmlElement("w:sz")
     size.set(qn("w:val"), str(round(spec["size_pt"] * 2)))
     r_pr.append(size)
@@ -290,13 +290,8 @@ def new_output_path(output: str | None) -> Path:
         result = Path(output).expanduser().resolve()
         if result.suffix.lower() != ".docx":
             raise ValueError("Output must use the .docx extension")
-        return result
-    result = Path.cwd() / "通用公文.docx"
-    index = 2
-    while result.exists():
-        result = Path.cwd() / f"通用公文_{index}.docx"
-        index += 1
-    return result
+        return unique_output_path(result)
+    return unique_output_path(Path.cwd() / "通用公文.docx")
 
 
 def add_text(document: Document, text: str) -> list[dict]:
@@ -315,7 +310,7 @@ def add_text(document: Document, text: str) -> list[dict]:
         elif line.startswith("[说明]"):
             role, line = "description", line[4:].strip()
         elif line.startswith("[版记]"):
-            role, line = "colophon", line[4:].strip()
+            role, line = "skip", line[4:].strip()
         paragraph = document.add_paragraph(line)
         if role:
             explicit[len(document.paragraphs) - 1] = role
@@ -332,7 +327,7 @@ def finalize(document: Document, output: Path, profile: dict, classifications: l
     document.save(output)
     scrub_docx(output)
     try:
-        validation = validate_document(output, profile)
+        validation = validate_document(output, profile, classifications)
     except Exception:
         output.unlink(missing_ok=True)
         raise
@@ -395,4 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     arguments = build_parser().parse_args()
-    arguments.func(arguments)
+    try:
+        arguments.func(arguments)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc

@@ -57,6 +57,7 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(profile["styles"]["reference_note"]["size_pt"], 15)
         self.assertEqual(profile["page_number"]["size_pt"], 14)
         self.assertTrue(profile["global"]["bold"])
+        self.assertNotIn("colophon", profile["styles"])
 
     def test_profile_draft_confirmation_and_restore(self) -> None:
         self.run_script("profile_manager.py", "begin", "--fresh")
@@ -73,6 +74,30 @@ class SkillTests(unittest.TestCase):
         restored = json.loads(self.run_script("profile_manager.py", "view").stdout)
         self.assertEqual(restored["source"], "built_in_preset")
 
+    def test_invalid_and_fixed_profile_fields_are_rejected(self) -> None:
+        self.run_script("profile_manager.py", "begin", "--fresh")
+        invalid_alignment = self.run_script(
+            "profile_manager.py", "set", "styles.body.alignment", '"diagonal"', check=False
+        )
+        self.assertNotEqual(invalid_alignment.returncode, 0)
+        self.assertIn("Unsupported value", invalid_alignment.stderr)
+        fixed_field = self.run_script(
+            "profile_manager.py", "set", "page_number.decoration", '"none"', check=False
+        )
+        self.assertNotEqual(fixed_field.returncode, 0)
+        self.assertIn("fixed in V1", fixed_field.stderr)
+
+    def test_page_number_bold_can_be_disabled_and_validated(self) -> None:
+        self.run_script("profile_manager.py", "begin", "--fresh")
+        self.run_script("profile_manager.py", "set", "page_number.bold", "false")
+        self.run_script("profile_manager.py", "confirm")
+        output = self.root / "page-number-not-bold.docx"
+        self.run_script("docx_engine.py", "create", "--text", "# 示例标题\n正文。", "--output", output)
+        profile = load_preset()
+        profile["page_number"]["bold"] = False
+        report = validate_document(output, profile)
+        self.assertTrue(report["valid"], report["errors"])
+
     def test_create_and_validate_duplex_document(self) -> None:
         output = self.root / "generated.docx"
         text = "# 示例标题\n[说明]某单位\n[说明]某年某月某日\n## 一、一级标题\n正文 Test 123。\n（补充参考资料。）"
@@ -87,6 +112,39 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(any(b"PAGE" in footer for footer in footers))
         self.assertTrue(any(b'w:jc w:val="right"' in footer for footer in footers))
         self.assertTrue(any(b'w:jc w:val="left"' in footer for footer in footers))
+
+    def test_existing_output_path_gets_numeric_suffix(self) -> None:
+        existing = self.root / "named-output.docx"
+        original = Document()
+        original.add_paragraph("SENTINEL")
+        original.save(existing)
+        result = json.loads(
+            self.run_script("docx_engine.py", "create", "--text", "# 新标题\n新正文。", "--output", existing).stdout
+        )
+        actual = Path(result["output"])
+        self.assertEqual(actual.name, "named-output_2.docx")
+        self.assertEqual(Document(existing).paragraphs[0].text, "SENTINEL")
+        self.assertTrue(actual.exists())
+
+    def test_new_colophon_content_is_preserved_without_formatting(self) -> None:
+        output = self.root / "colophon-unsupported.docx"
+        result = json.loads(
+            self.run_script(
+                "docx_engine.py",
+                "create",
+                "--text",
+                "# 示例标题\n正文。\n[版记]某单位办公室 某年某月某日印发",
+                "--output",
+                output,
+            ).stdout
+        )
+        self.assertTrue(any("preserved without managed formatting" in warning for warning in result["warnings"]))
+        document = Document(output)
+        self.assertEqual(document.paragraphs[-1].text, "某单位办公室 某年某月某日印发")
+        self.assertEqual(document.paragraphs[-1].style.name, "Normal")
+        report = validate_document(output, load_preset())
+        self.assertTrue(report["valid"], report["errors"])
+        self.assertTrue(any("preserved without managed formatting" in warning for warning in report["warnings"]))
 
     def test_existing_document_preserves_table_and_picture(self) -> None:
         source = self.root / "source.docx"

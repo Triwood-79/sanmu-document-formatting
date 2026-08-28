@@ -169,4 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 if __name__ == "__main__":
     arguments = build_parser().parse_args()
-    arguments.func(arguments)
+    try:
+        arguments.func(arguments)
+    except (KeyError, TypeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
