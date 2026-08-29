@@ -10,7 +10,7 @@ Use this skill to create or reformat `.docx` files without Microsoft Word. Use t
 ## Route the request
 
 - New document: accept plain text or Markdown, then run `scripts/docx_engine.py create`.
-- Existing document: run `scripts/inspect_docx.py`, show the classification and risk summary, obtain confirmation or corrections, then run `scripts/docx_engine.py format-existing --confirmed`.
+- Existing document: run `scripts/inspect_docx.py`, show the paragraph classification, table plan, and risk summary, obtain confirmation or corrections, then run `scripts/docx_engine.py format-existing --confirmed`. The table plan may set `title_paragraph_index` and `header_rows` to `0`, `1`, or `2` for each table.
 - `查看当前排版格式`: run `scripts/profile_manager.py view`.
 - `修改排版格式`: run `profile_manager.py view`, show the current values for the requested groups, run `begin`, ask only those groups, apply answers with `set`, show `diff`, and save only after the user says `确认保存`.
 - `重新录入排版格式`: run `profile_manager.py view` first and display the complete current profile in grouped, user-readable form. Then use `begin --fresh`, ask every V1-open field with its current value shown beside the question, and follow the same diff and confirmation flow. If the user chooses to keep a current value, explicitly write that value into the fresh draft so it is not reset to the built-in default.
@@ -26,10 +26,18 @@ Never treat an ordinary per-document instruction as a persistent profile change.
 3. If `python-docx` or `lxml` is missing, explain the missing capability and request authorization before installation. Never install software or fonts silently.
 4. For existing files, refuse `.doc` and `.docm`. Stop on corrupt, encrypted, commented, or tracked-change documents and request a clean `.docx` copy.
 5. Never overwrite an input file. The engine creates `<stem>_排版后.docx`, adding a numeric suffix when needed.
-6. Preserve tables, pictures, text boxes, and unusual landscape sections. Report them; do not normalize their contents.
-7. V1 does not format colophons. Preserve existing colophon paragraphs unchanged; when new content contains a colophon, keep the content unformatted and tell the user to finish it manually.
+6. Normalize all processed text to black. For tables, normalize font families and text color only; preserve font sizes, bold settings, alignment, spacing, borders, shading, row heights, and column widths. Preserve pictures, text boxes, and unusual landscape sections without internal normalization.
+7. V1 does not create or rebuild complete colophon structures. Classify an existing issuance-office/date line as `colophon`, normalize only its Chinese/Latin font families to the body fonts and its text color to black, and preserve its size, bold setting, alignment, spacing, separators, and placement. Tell the user that complex colophon layout still requires manual completion.
 8. Run `scripts/privacy_scrub.py` and `scripts/validate_docx.py` on every output.
 9. Use `scripts/render_docx.py` only when a supported renderer is detected. Without rendering, report structural validation only, never visual approval.
+
+## Table formatting
+
+- If a table has a confirmed title paragraph, use the main-title Chinese and Latin font families and set its text to black; preserve its other paragraph formatting.
+- Use the heading-1 font families and black text for the first header row.
+- If a second header row is confirmed, use the heading-2 font families and black text for that row.
+- Use the body font families and black text for all remaining table rows.
+- Inspection proposes one header row by default and proposes two only when the first row has merged cells or the second row is marked as a repeating header. Always show the proposal before formatting so the user can correct it.
 
 ## Profile questions
 

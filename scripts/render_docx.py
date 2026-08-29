@@ -14,7 +14,6 @@ def libreoffice_render(source: Path, output: Path, executable: str) -> None:
         [executable, "--headless", "--convert-to", "pdf", "--outdir", str(output.parent), str(source)],
         check=True,
         capture_output=True,
-        text=True,
     )
     generated = output.parent / f"{source.stem}.pdf"
     if generated != output:
@@ -37,7 +36,7 @@ def word_render(source: Path, output: Path) -> bool:
     env["ODF_RENDER_INPUT"] = str(source)
     env["ODF_RENDER_OUTPUT"] = str(output)
     output.parent.mkdir(parents=True, exist_ok=True)
-    result = subprocess.run([powershell, "-NoProfile", "-Command", script], env=env, capture_output=True, text=True)
+    result = subprocess.run([powershell, "-NoProfile", "-Command", script], env=env, capture_output=True)
     return result.returncode == 0 and output.exists()
 
 

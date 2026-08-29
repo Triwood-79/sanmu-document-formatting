@@ -8,13 +8,19 @@ from pathlib import Path
 
 from docx import Document
 from docx.enum.section import WD_ORIENT
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.table import Table
+from docx.text.paragraph import Paragraph
 
 
 H1_RE = re.compile(r"^[一二三四五六七八九十百]+、")
 H2_RE = re.compile(r"^（[一二三四五六七八九十百]+）")
 DATE_RE = re.compile(r"^(?:\d{4}年\d{1,2}月\d{1,2}日|某年某月某日)$")
 NOTE_RE = re.compile(r"^(?:（.*）|\(.*\))$", re.DOTALL)
+COLOPHON_RE = re.compile(r"(?:\d{4}年\d{1,2}月\d{1,2}日|某年某月某日)\s*印发[。．.]?$")
 ALLOWED_EXTENSIONS = {".docx"}
+TABLE_TITLE_SUFFIXES = ("统计表", "一览表", "明细表", "安排表", "情况表", "汇总表", "清单")
 STYLE_ROLES = {
     "ODF Main Title": "main_title",
     "ODF Heading 1": "heading1",
@@ -22,7 +28,7 @@ STYLE_ROLES = {
     "ODF Body": "body",
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
-    "ODF Colophon": "skip",
+    "ODF Colophon": "colophon",
 }
 
 
@@ -52,6 +58,7 @@ def package_risks(path: Path) -> tuple[list[str], list[str]]:
 def classify_paragraphs(document: Document) -> list[dict]:
     entries: list[dict] = []
     nonempty = [index for index, paragraph in enumerate(document.paragraphs) if paragraph.text.strip()]
+    tail_indices = set(nonempty[-5:])
     title_index = nonempty[0] if nonempty else None
     description_indices: set[int] = set()
     if title_index is not None:
@@ -80,10 +87,70 @@ def classify_paragraphs(document: Document) -> list[dict]:
             role = "heading2"
         elif NOTE_RE.fullmatch(text):
             role = "reference_note"
+        elif index in tail_indices and COLOPHON_RE.search(text):
+            role = "colophon"
         else:
             role = "body"
         entries.append({"index": index, "role": role, "text_preview": text[:80]})
     return entries
+
+
+def looks_like_table_title(paragraph: Paragraph) -> bool:
+    text = paragraph.text.strip()
+    if not text or len(text) > 80 or text.endswith(("。", "；", "：", ":")):
+        return False
+    explicit_number = re.match(r"^(?:附?表)\s*[一二三四五六七八九十百\d]+", text) is not None
+    descriptive_suffix = text.endswith(TABLE_TITLE_SUFFIXES)
+    centered_table_name = paragraph.alignment == WD_ALIGN_PARAGRAPH.CENTER and text.endswith("表")
+    return explicit_number or descriptive_suffix or centered_table_name
+
+
+def row_is_repeating_header(row) -> bool:
+    tr_pr = row._tr.trPr
+    return tr_pr is not None and tr_pr.find(qn("w:tblHeader")) is not None
+
+
+def row_has_merge(row) -> bool:
+    cells = row.cells
+    if len({id(cell._tc) for cell in cells}) < len(cells):
+        return True
+    for cell in cells:
+        tc_pr = cell._tc.tcPr
+        if tc_pr is not None and tc_pr.find(qn("w:vMerge")) is not None:
+            return True
+    return False
+
+
+def analyze_tables(document: Document) -> list[dict]:
+    blocks = list(document.iter_inner_content())
+    tables: list[dict] = []
+    paragraph_index = -1
+    table_index = -1
+    for block_index, block in enumerate(blocks):
+        if isinstance(block, Paragraph):
+            paragraph_index += 1
+            continue
+        if not isinstance(block, Table):
+            continue
+        table_index += 1
+        title_index = None
+        title_preview = None
+        previous = blocks[block_index - 1] if block_index else None
+        if isinstance(previous, Paragraph) and looks_like_table_title(previous):
+            title_index = paragraph_index
+            title_preview = previous.text.strip()[:80]
+        header_rows = 1 if block.rows else 0
+        if len(block.rows) > 1 and (row_is_repeating_header(block.rows[1]) or row_has_merge(block.rows[0])):
+            header_rows = 2
+        tables.append({
+            "index": table_index,
+            "title_paragraph_index": title_index,
+            "title_preview": title_preview,
+            "header_rows": header_rows,
+            "rows": len(block.rows),
+            "columns": len(block.columns),
+        })
+    return tables
 
 
 def inspect_document(path: Path) -> dict:
@@ -103,15 +170,18 @@ def inspect_document(path: Path) -> dict:
         drawing_count = xml.count(b"<w:drawing") + xml.count(b"<w:pict")
         textbox_count = xml.count(b"<w:txbxContent")
     landscape_sections = sum(1 for section in document.sections if section.orientation == WD_ORIENT.LANDSCAPE)
-    legacy_colophon_count = sum(1 for paragraph in document.paragraphs if paragraph.style.name == "ODF Colophon")
+    classifications = classify_paragraphs(document)
+    colophon_count = sum(1 for item in classifications if item["role"] == "colophon")
     if landscape_sections:
         warnings.append("Landscape sections will be preserved and will not receive portrait page settings")
-    if legacy_colophon_count:
-        warnings.append("Colophon formatting is not supported in V1; detected colophon paragraphs will be preserved unchanged")
-    if document.tables or drawing_count or textbox_count:
+    if colophon_count:
+        warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
+    if document.tables:
+        warnings.append("Table fonts and text color will be normalized; borders, shading, alignment, sizes, row heights, and column widths will be preserved")
+    if drawing_count or textbox_count:
         warnings.append("Complex elements will be preserved without internal reformatting")
 
-    classifications = classify_paragraphs(document)
+    tables = analyze_tables(document)
     counts: dict[str, int] = {}
     for item in classifications:
         counts[item["role"]] = counts.get(item["role"], 0) + 1
@@ -122,13 +192,15 @@ def inspect_document(path: Path) -> dict:
         "summary": {
             "top_level_paragraphs": len(document.paragraphs),
             "tables": len(document.tables),
+            "table_title_candidates": sum(1 for table in tables if table["title_paragraph_index"] is not None),
             "drawings": drawing_count,
             "textboxes": textbox_count,
             "landscape_sections": landscape_sections,
-            "unsupported_colophon_paragraphs": legacy_colophon_count,
+            "colophon_paragraphs": colophon_count,
             "classification_counts": counts,
         },
         "classifications": classifications,
+        "tables": tables,
         "confirmation_required": not blockers,
     }
 
@@ -141,7 +213,10 @@ def main() -> None:
     result = inspect_document(Path(args.input).expanduser().resolve())
     if args.write_map and "classifications" in result:
         output = Path(args.write_map).expanduser().resolve()
-        output.write_text(json.dumps({"classifications": result["classifications"]}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        output.write_text(
+            json.dumps({"classifications": result["classifications"], "tables": result.get("tables", [])}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     raise SystemExit(2 if result.get("blockers") else 0)
 

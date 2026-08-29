@@ -12,10 +12,10 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Cm, Mm, Pt
+from docx.shared import Cm, Mm, Pt, RGBColor
 
 from common import active_profile, choose_output_path, read_json, unique_output_path
-from inspect_docx import classify_paragraphs, inspect_document
+from inspect_docx import analyze_tables, classify_paragraphs, inspect_document
 from privacy_scrub import scrub_docx
 from validate_docx import validate_document
 
@@ -109,6 +109,20 @@ def set_rfonts(run_or_font, east_asia: str, latin: str) -> None:
     r_fonts.set(qn("w:cs"), latin)
 
 
+def set_run_black(run) -> None:
+    run.font.color.rgb = RGBColor(0, 0, 0)
+    color = run._element.get_or_add_rPr().find(qn("w:color"))
+    if color is not None:
+        color.set(qn("w:val"), "000000")
+        for attr in ("themeColor", "themeTint", "themeShade"):
+            color.attrib.pop(qn(f"w:{attr}"), None)
+
+
+def set_paragraph_black(paragraph) -> None:
+    for run in paragraph.runs:
+        set_run_black(run)
+
+
 def set_paragraph_geometry(paragraph, spec: dict) -> None:
     paragraph.alignment = ALIGNMENTS[spec["alignment"]]
     fmt = paragraph.paragraph_format
@@ -138,6 +152,7 @@ def ensure_styles(document: Document, profile: dict, fonts: dict[str, str]) -> N
         style.font.name = spec["font_latin"]
         style.font.size = Pt(spec["size_pt"])
         style.font.bold = profile["global"]["bold"]
+        style.font.color.rgb = RGBColor(0, 0, 0)
         set_rfonts(style, fonts[role], spec["font_latin"])
         style.paragraph_format.alignment = ALIGNMENTS[spec["alignment"]]
         style.paragraph_format.space_before = Pt(spec["space_before_pt"])
@@ -146,6 +161,10 @@ def ensure_styles(document: Document, profile: dict, fonts: dict[str, str]) -> N
 
 def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str]) -> None:
     if role == "skip":
+        set_paragraph_black(paragraph)
+        return
+    if role == "colophon":
+        apply_font_only(paragraph, profile["styles"]["body"], fonts["body"])
         return
     if role not in ROLE_NAMES:
         raise ValueError(f"Unsupported paragraph role: {role}")
@@ -157,6 +176,34 @@ def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str]) -> No
         run.font.size = Pt(spec["size_pt"])
         run.font.bold = profile["global"]["bold"]
         set_rfonts(run, fonts[role], spec["font_latin"])
+        set_run_black(run)
+
+
+def apply_font_only(paragraph, spec: dict, font_name: str) -> None:
+    for run in paragraph.runs:
+        run.font.name = spec["font_latin"]
+        set_rfonts(run, font_name, spec["font_latin"])
+        set_run_black(run)
+
+
+def apply_table_format(document: Document, table_specs: list[dict], profile: dict, fonts: dict[str, str]) -> None:
+    for table_spec in table_specs:
+        title_index = table_spec.get("title_paragraph_index")
+        if title_index is not None:
+            apply_font_only(document.paragraphs[title_index], profile["styles"]["main_title"], fonts["main_title"])
+        table = document.tables[table_spec["index"]]
+        header_rows = table_spec["header_rows"]
+        for row_index, row in enumerate(table.rows):
+            if row_index == 0 and header_rows >= 1:
+                role = "heading1"
+            elif row_index == 1 and header_rows >= 2:
+                role = "heading2"
+            else:
+                role = "body"
+            spec = profile["styles"][role]
+            for cell in row.cells:
+                for paragraph in cell.paragraphs:
+                    apply_font_only(paragraph, spec, fonts[role])
 
 
 def apply_page_setup(document: Document, profile: dict, warnings: list[str]) -> None:
@@ -201,11 +248,15 @@ def add_page_field(paragraph, spec: dict, font_name: str) -> None:
         run.font.size = Pt(spec["size_pt"])
         run.font.bold = spec["bold"]
         set_rfonts(run, font_name, font_name)
+        set_run_black(run)
     r_pr = OxmlElement("w:rPr")
     r_fonts = OxmlElement("w:rFonts")
     for attr in ("eastAsia", "ascii", "hAnsi", "cs"):
         r_fonts.set(qn(f"w:{attr}"), font_name)
     r_pr.append(r_fonts)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "000000")
+    r_pr.append(color)
     if spec["bold"]:
         bold = OxmlElement("w:b")
         r_pr.append(bold)
@@ -248,9 +299,37 @@ def load_overrides(path: str | None) -> dict | None:
     return read_json(Path(path).expanduser().resolve()) if path else None
 
 
-def load_classifications(path: str | None, document: Document) -> list[dict]:
+def validate_table_specs(items: list[dict], document: Document) -> list[dict]:
+    defaults = {item["index"]: item for item in analyze_tables(document)}
+    validated = dict(defaults)
+    seen: set[int] = set()
+    for item in items:
+        index = item.get("index")
+        if not isinstance(index, int) or index not in defaults:
+            raise ValueError(f"Invalid table index: {index}")
+        if index in seen:
+            raise ValueError(f"Duplicate table index: {index}")
+        seen.add(index)
+        header_rows = item.get("header_rows")
+        if not isinstance(header_rows, int) or header_rows < 0 or header_rows > min(2, len(document.tables[index].rows)):
+            raise ValueError(f"Table {index} header_rows must be 0, 1, or 2 and cannot exceed the row count")
+        title_index = item.get("title_paragraph_index")
+        if title_index is not None and (
+            not isinstance(title_index, int) or title_index < 0 or title_index >= len(document.paragraphs)
+        ):
+            raise ValueError(f"Invalid title paragraph for table {index}: {title_index}")
+        validated[index] = {
+            **defaults[index],
+            "title_paragraph_index": title_index,
+            "title_preview": document.paragraphs[title_index].text.strip()[:80] if title_index is not None else None,
+            "header_rows": header_rows,
+        }
+    return [validated[index] for index in sorted(validated)]
+
+
+def load_format_map(path: str | None, document: Document) -> tuple[list[dict], list[dict]]:
     if not path:
-        return classify_paragraphs(document)
+        return classify_paragraphs(document), analyze_tables(document)
     data = read_json(Path(path).expanduser().resolve())
     items = data.get("classifications")
     if not isinstance(items, list):
@@ -261,19 +340,33 @@ def load_classifications(path: str | None, document: Document) -> list[dict]:
         role = item.get("role")
         if not isinstance(index, int) or index < 0 or index >= len(document.paragraphs):
             raise ValueError(f"Invalid paragraph index: {index}")
-        if role not in {*ROLE_NAMES, "skip"}:
+        if role not in {*ROLE_NAMES, "colophon", "skip"}:
             raise ValueError(f"Invalid role at paragraph {index}: {role}")
         if index in seen:
             raise ValueError(f"Duplicate paragraph index: {index}")
         seen.add(index)
-    return items
+    table_items = data.get("tables")
+    if table_items is None:
+        table_specs = analyze_tables(document)
+    elif not isinstance(table_items, list):
+        raise ValueError("Classification file tables must be an array")
+    else:
+        table_specs = validate_table_specs(table_items, document)
+    return items, table_specs
 
 
-def apply_document_format(document: Document, classifications: list[dict], profile: dict) -> list[str]:
+def apply_document_format(document: Document, classifications: list[dict], table_specs: list[dict], profile: dict) -> list[str]:
     fonts, page_font, warnings = resolve_fonts(profile)
     ensure_styles(document, profile, fonts)
+    table_title_indexes = {
+        item["title_paragraph_index"] for item in table_specs if item.get("title_paragraph_index") is not None
+    }
     for item in classifications:
-        apply_role(document.paragraphs[item["index"]], item["role"], profile, fonts)
+        role = "skip" if item["index"] in table_title_indexes else item["role"]
+        apply_role(document.paragraphs[item["index"]], role, profile, fonts)
+    if any(item["role"] == "colophon" for item in classifications):
+        warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
+    apply_table_format(document, table_specs, profile, fonts)
     apply_page_setup(document, profile, warnings)
     set_footer(document, profile, page_font)
     return warnings
@@ -310,7 +403,7 @@ def add_text(document: Document, text: str) -> list[dict]:
         elif line.startswith("[说明]"):
             role, line = "description", line[4:].strip()
         elif line.startswith("[版记]"):
-            role, line = "skip", line[4:].strip()
+            role, line = "colophon", line[4:].strip()
         paragraph = document.add_paragraph(line)
         if role:
             explicit[len(document.paragraphs) - 1] = role
@@ -321,13 +414,13 @@ def add_text(document: Document, text: str) -> list[dict]:
     return classifications
 
 
-def finalize(document: Document, output: Path, profile: dict, classifications: list[dict]) -> dict:
+def finalize(document: Document, output: Path, profile: dict, classifications: list[dict], table_specs: list[dict]) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
-    warnings = apply_document_format(document, classifications, profile)
+    warnings = apply_document_format(document, classifications, table_specs, profile)
     document.save(output)
     scrub_docx(output)
     try:
-        validation = validate_document(output, profile, classifications)
+        validation = validate_document(output, profile, classifications, table_specs)
     except Exception:
         output.unlink(missing_ok=True)
         raise
@@ -343,7 +436,7 @@ def command_create(args: argparse.Namespace) -> None:
         profile["page"]["print_mode"] = args.print_mode
     document = Document()
     classifications = add_text(document, read_source_text(args))
-    result = finalize(document, new_output_path(args.output), profile, classifications)
+    result = finalize(document, new_output_path(args.output), profile, classifications, [])
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 
@@ -358,9 +451,9 @@ def command_format_existing(args: argparse.Namespace) -> None:
     if args.print_mode:
         profile["page"]["print_mode"] = args.print_mode
     document = Document(source)
-    classifications = load_classifications(args.classification, document)
+    classifications, table_specs = load_format_map(args.classification, document)
     output = choose_output_path(source, args.output)
-    result = finalize(document, output, profile, classifications)
+    result = finalize(document, output, profile, classifications, table_specs)
     result["warnings"] = sorted(set(result["warnings"] + inspection.get("warnings", [])))
     print(json.dumps(result, ensure_ascii=False, indent=2))
 

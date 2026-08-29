@@ -11,6 +11,9 @@ import zipfile
 from pathlib import Path
 
 from docx import Document
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.shared import Pt, RGBColor
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +29,17 @@ from validate_docx import validate_document  # noqa: E402
 PNG_1X1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Wl2nWQAAAAASUVORK5CYII="
 )
+
+
+def run_east_asia_font(run) -> str | None:
+    r_pr = run._element.rPr
+    return r_pr.rFonts.get(qn("w:eastAsia")) if r_pr is not None and r_pr.rFonts is not None else None
+
+
+def run_color(run) -> str | None:
+    r_pr = run._element.rPr
+    color = r_pr.find(qn("w:color")) if r_pr is not None else None
+    return color.get(qn("w:val")) if color is not None else None
 
 
 class SkillTests(unittest.TestCase):
@@ -126,7 +140,7 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(Document(existing).paragraphs[0].text, "SENTINEL")
         self.assertTrue(actual.exists())
 
-    def test_new_colophon_content_is_preserved_without_formatting(self) -> None:
+    def test_new_colophon_content_gets_font_only_normalization(self) -> None:
         output = self.root / "colophon-unsupported.docx"
         result = json.loads(
             self.run_script(
@@ -138,38 +152,136 @@ class SkillTests(unittest.TestCase):
                 output,
             ).stdout
         )
-        self.assertTrue(any("preserved without managed formatting" in warning for warning in result["warnings"]))
+        self.assertTrue(any("Colophon structure was preserved" in warning for warning in result["warnings"]))
         document = Document(output)
         self.assertEqual(document.paragraphs[-1].text, "某单位办公室 某年某月某日印发")
         self.assertEqual(document.paragraphs[-1].style.name, "Normal")
+        self.assertIn(
+            run_east_asia_font(document.paragraphs[-1].runs[0]),
+            {"方正仿宋_GBK", "仿宋_GB2312", "仿宋GB2312", "FangSong_GB2312", "FangSong"},
+        )
+        self.assertEqual(run_color(document.paragraphs[-1].runs[0]), "000000")
         report = validate_document(output, load_preset())
         self.assertTrue(report["valid"], report["errors"])
-        self.assertTrue(any("preserved without managed formatting" in warning for warning in report["warnings"]))
+        self.assertTrue(any("Colophon structure was preserved" in warning for warning in report["warnings"]))
+
+    def test_existing_colophon_preserves_geometry_and_size(self) -> None:
+        source = self.root / "existing-colophon.docx"
+        document = Document()
+        document.add_paragraph("示例标题")
+        document.add_paragraph("这是正文。")
+        colophon = document.add_paragraph()
+        colophon.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        run = colophon.add_run("某测试单位办公室 2026年8月28日印发")
+        run.font.name = "Arial"
+        run.font.size = Pt(12)
+        run.font.color.rgb = RGBColor(31, 78, 121)
+        document.save(source)
+
+        inspection = inspect_document(source)
+        self.assertEqual(inspection["classifications"][-1]["role"], "colophon")
+        mapping = self.root / "existing-colophon-map.json"
+        mapping.write_text(
+            json.dumps({"classifications": inspection["classifications"], "tables": []}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        output = self.root / "existing-colophon-formatted.docx"
+        self.run_script(
+            "docx_engine.py",
+            "format-existing",
+            "--input",
+            source,
+            "--output",
+            output,
+            "--classification",
+            mapping,
+            "--confirmed",
+        )
+
+        formatted = Document(output)
+        paragraph = formatted.paragraphs[-1]
+        formatted_run = paragraph.runs[0]
+        self.assertEqual(paragraph.alignment, WD_ALIGN_PARAGRAPH.RIGHT)
+        self.assertEqual(formatted_run.font.size.pt, 12)
+        self.assertIn(
+            run_east_asia_font(formatted_run),
+            {"方正仿宋_GBK", "仿宋_GB2312", "仿宋GB2312", "FangSong_GB2312", "FangSong"},
+        )
+        self.assertEqual(run_color(formatted_run), "000000")
 
     def test_existing_document_preserves_table_and_picture(self) -> None:
         source = self.root / "source.docx"
         image = self.root / "pixel.png"
         image.write_bytes(PNG_1X1)
         document = Document()
-        document.add_paragraph("示例标题")
+        title = document.add_paragraph("示例标题")
+        title.runs[0].font.color.rgb = RGBColor(31, 78, 121)
         document.add_paragraph("这是正文。")
-        table = document.add_table(rows=1, cols=1)
-        table.cell(0, 0).text = "表格内容"
+        table = document.add_table(rows=2, cols=1)
+        table.cell(0, 0).text = "表头"
+        table.cell(1, 0).text = "表格内容"
         document.add_picture(str(image))
         document.save(source)
         inspection = inspect_document(source)
         self.assertEqual(inspection["summary"]["tables"], 1)
         self.assertGreaterEqual(inspection["summary"]["drawings"], 1)
         mapping = self.root / "classification.json"
-        mapping.write_text(json.dumps({"classifications": inspection["classifications"]}, ensure_ascii=False), encoding="utf-8")
+        mapping.write_text(
+            json.dumps({"classifications": inspection["classifications"], "tables": inspection["tables"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
         output = self.root / "formatted.docx"
         self.run_script("docx_engine.py", "format-existing", "--input", source, "--output", output, "--classification", mapping, "--confirmed")
         formatted = Document(output)
-        self.assertEqual(formatted.tables[0].cell(0, 0).text, "表格内容")
+        self.assertEqual(formatted.tables[0].cell(1, 0).text, "表格内容")
+        self.assertEqual(run_color(formatted.paragraphs[0].runs[0]), "000000")
+        self.assertIn(run_east_asia_font(formatted.tables[0].cell(0, 0).paragraphs[0].runs[0]), {"方正黑体_GBK", "黑体", "SimHei"})
+        self.assertIn(run_east_asia_font(formatted.tables[0].cell(1, 0).paragraphs[0].runs[0]), {"方正仿宋_GBK", "仿宋_GB2312", "FangSong_GB2312", "FangSong"})
+        self.assertEqual(run_color(formatted.tables[0].cell(0, 0).paragraphs[0].runs[0]), "000000")
+        self.assertEqual(run_color(formatted.tables[0].cell(1, 0).paragraphs[0].runs[0]), "000000")
         with zipfile.ZipFile(source) as before, zipfile.ZipFile(output) as after:
             before_media = {name: before.read(name) for name in before.namelist() if name.startswith("word/media/")}
             after_media = {name: after.read(name) for name in after.namelist() if name.startswith("word/media/")}
         self.assertEqual(before_media, after_media)
+
+    def test_table_title_and_two_header_rows_use_role_fonts(self) -> None:
+        source = self.root / "two-level-table.docx"
+        document = Document()
+        document.add_paragraph("示例公文标题")
+        document.add_paragraph("这是表格前的正文。")
+        table_title = document.add_paragraph("测试任务安排表")
+        table_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        table = document.add_table(rows=4, cols=2)
+        table.cell(0, 0).merge(table.cell(0, 1)).text = "第一层表头"
+        table.cell(1, 0).text = "第二层甲"
+        table.cell(1, 1).text = "第二层乙"
+        table.cell(2, 0).text = "正文甲"
+        table.cell(2, 1).text = "正文乙"
+        table.cell(3, 0).text = "正文丙"
+        table.cell(3, 1).text = "正文丁"
+        document.save(source)
+
+        inspection = inspect_document(source)
+        self.assertEqual(inspection["tables"][0]["title_paragraph_index"], 2)
+        self.assertEqual(inspection["tables"][0]["header_rows"], 2)
+        mapping = self.root / "two-level-table-map.json"
+        mapping.write_text(
+            json.dumps({"classifications": inspection["classifications"], "tables": inspection["tables"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        output = self.root / "two-level-table-formatted.docx"
+        self.run_script("docx_engine.py", "format-existing", "--input", source, "--output", output, "--classification", mapping, "--confirmed")
+
+        formatted = Document(output)
+        title_run = formatted.paragraphs[2].runs[0]
+        header1_run = formatted.tables[0].cell(0, 0).paragraphs[0].runs[0]
+        header2_run = formatted.tables[0].cell(1, 0).paragraphs[0].runs[0]
+        body_run = formatted.tables[0].cell(2, 0).paragraphs[0].runs[0]
+        self.assertIn(run_east_asia_font(title_run), {"方正小标宋_GBK", "方正小标宋简体"})
+        self.assertIn(run_east_asia_font(header1_run), {"方正黑体_GBK", "黑体", "SimHei"})
+        self.assertIn(run_east_asia_font(header2_run), {"方正楷体_GBK", "楷体_GB2312", "楷体GB2312", "KaiTi_GB2312", "KaiTi"})
+        self.assertIn(run_east_asia_font(body_run), {"方正仿宋_GBK", "仿宋_GB2312", "仿宋GB2312", "FangSong_GB2312", "FangSong"})
+        self.assertTrue(all(run_color(run) == "000000" for run in (title_run, header1_run, header2_run, body_run)))
 
     def test_legacy_extension_and_tracked_changes_are_blocked(self) -> None:
         document = Document()

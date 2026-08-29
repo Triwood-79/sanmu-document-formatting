@@ -12,6 +12,7 @@ from docx.oxml.ns import qn
 from lxml import etree
 
 from common import active_profile, read_json
+from inspect_docx import analyze_tables, classify_paragraphs
 
 
 STYLE_ROLES = {
@@ -21,9 +22,9 @@ STYLE_ROLES = {
     "ODF Body": "body",
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
-    "ODF Colophon": "skip",
+    "ODF Colophon": "colophon",
 }
-ROLE_STYLES = {role: style for style, role in STYLE_ROLES.items() if role != "skip"}
+ROLE_STYLES = {role: style for style, role in STYLE_ROLES.items() if role not in {"colophon", "skip"}}
 ALIGNMENTS = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
     "center": WD_ALIGN_PARAGRAPH.CENTER,
@@ -41,6 +42,41 @@ FONT_ALIASES = {
 
 def near(actual: float | None, expected: float, tolerance: float = 0.05) -> bool:
     return actual is not None and abs(actual - expected) <= tolerance
+
+
+def run_color_is_black(run) -> bool:
+    r_pr = run._element.rPr
+    color = r_pr.find(qn("w:color")) if r_pr is not None else None
+    return color is not None and color.get(qn("w:val"), "").upper() == "000000"
+
+
+def validate_run_font(run, label: str, spec: dict, errors: list[str]) -> bool:
+    r_pr = run._element.rPr
+    east_asia = r_pr.rFonts.get(qn("w:eastAsia")) if r_pr is not None and r_pr.rFonts is not None else None
+    ascii_font = r_pr.rFonts.get(qn("w:ascii")) if r_pr is not None and r_pr.rFonts is not None else None
+    hansi_font = r_pr.rFonts.get(qn("w:hAnsi")) if r_pr is not None and r_pr.rFonts is not None else None
+    allowed_fonts = {spec["font_cn"], spec["font_fallback"]} | FONT_ALIASES.get(spec["font_fallback"], set())
+    if east_asia not in allowed_fonts:
+        errors.append(f"{label} has an unexpected East Asian font")
+        return False
+    if ascii_font != spec["font_latin"] or hansi_font != spec["font_latin"]:
+        errors.append(f"{label} has an unexpected Latin font")
+        return False
+    if not run_color_is_black(run):
+        errors.append(f"{label} is not black")
+        return False
+    return True
+
+
+def validate_font_only(paragraph, label: str, spec: dict, errors: list[str]) -> None:
+    for run in (run for run in paragraph.runs if run.text):
+        if not validate_run_font(run, label, spec, errors):
+            break
+
+
+def validate_black_only(paragraph, label: str, errors: list[str]) -> None:
+    if any(run.text and not run_color_is_black(run) for run in paragraph.runs):
+        errors.append(f"{label} is not black")
 
 
 def validate_paragraph(paragraph, index: int, role: str, spec: dict, global_bold: bool, errors: list[str]) -> None:
@@ -69,20 +105,46 @@ def validate_paragraph(paragraph, index: int, role: str, spec: dict, global_bold
         if run.font.bold is not global_bold:
             errors.append(f"Paragraph {index} ({role}) has incorrect bold setting")
             break
-        r_pr = run._element.rPr
-        east_asia = r_pr.rFonts.get(qn("w:eastAsia")) if r_pr is not None and r_pr.rFonts is not None else None
-        ascii_font = r_pr.rFonts.get(qn("w:ascii")) if r_pr is not None and r_pr.rFonts is not None else None
-        hansi_font = r_pr.rFonts.get(qn("w:hAnsi")) if r_pr is not None and r_pr.rFonts is not None else None
-        allowed_fonts = {spec["font_cn"], spec["font_fallback"]} | FONT_ALIASES.get(spec["font_fallback"], set())
-        if east_asia not in allowed_fonts:
-            errors.append(f"Paragraph {index} ({role}) has an unexpected East Asian font")
-            break
-        if ascii_font != spec["font_latin"] or hansi_font != spec["font_latin"]:
-            errors.append(f"Paragraph {index} ({role}) has an unexpected Latin font")
+        if not validate_run_font(run, f"Paragraph {index} ({role})", spec, errors):
             break
 
 
-def validate_document(path: Path, profile: dict | None = None, classifications: list[dict] | None = None) -> dict:
+def validate_tables(document: Document, table_specs: list[dict], profile: dict, errors: list[str]) -> None:
+    for table_spec in table_specs:
+        table_index = table_spec["index"]
+        title_index = table_spec.get("title_paragraph_index")
+        if title_index is not None:
+            validate_font_only(
+                document.paragraphs[title_index],
+                f"Table {table_index} title paragraph {title_index}",
+                profile["styles"]["main_title"],
+                errors,
+            )
+        table = document.tables[table_index]
+        header_rows = table_spec["header_rows"]
+        for row_index, row in enumerate(table.rows):
+            if row_index == 0 and header_rows >= 1:
+                role = "heading1"
+            elif row_index == 1 and header_rows >= 2:
+                role = "heading2"
+            else:
+                role = "body"
+            for cell_index, cell in enumerate(row.cells):
+                for paragraph_index, paragraph in enumerate(cell.paragraphs):
+                    validate_font_only(
+                        paragraph,
+                        f"Table {table_index} row {row_index} cell {cell_index} paragraph {paragraph_index}",
+                        profile["styles"][role],
+                        errors,
+                    )
+
+
+def validate_document(
+    path: Path,
+    profile: dict | None = None,
+    classifications: list[dict] | None = None,
+    table_specs: list[dict] | None = None,
+) -> dict:
     path = path.expanduser().resolve()
     errors: list[str] = []
     warnings: list[str] = []
@@ -111,14 +173,23 @@ def validate_document(path: Path, profile: dict | None = None, classifications: 
         if not near(section.page_width.mm, 210, 0.1) or not near(section.page_height.mm, 297, 0.1):
             errors.append(f"Section {number} is not A4 portrait size")
 
+    table_specs = table_specs if table_specs is not None else analyze_tables(document)
+    table_title_indexes = {
+        item["title_paragraph_index"] for item in table_specs if item.get("title_paragraph_index") is not None
+    }
     expected_roles = (
         {item["index"]: item["role"] for item in classifications}
         if classifications is not None
-        else {index: STYLE_ROLES.get(paragraph.style.name) for index, paragraph in enumerate(document.paragraphs)}
+        else {item["index"]: item["role"] for item in classify_paragraphs(document)}
     )
     for index, paragraph in enumerate(document.paragraphs):
+        if index in table_title_indexes:
+            continue
         role = expected_roles.get(index)
-        if role in profile["styles"]:
+        if role == "colophon":
+            validate_font_only(paragraph, f"Paragraph {index} (colophon)", profile["styles"]["body"], errors)
+            warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
+        elif role in profile["styles"]:
             if classifications is not None and paragraph.style.name != ROLE_STYLES[role]:
                 errors.append(f"Paragraph {index} ({role}) is missing its managed style")
             validate_paragraph(
@@ -130,7 +201,10 @@ def validate_document(path: Path, profile: dict | None = None, classifications: 
                 errors,
             )
         elif paragraph.text.strip():
+            validate_black_only(paragraph, f"Paragraph {index}", errors)
             warnings.append(f"Paragraph {index} was preserved without managed formatting")
+
+    validate_tables(document, table_specs, profile, errors)
 
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
@@ -166,6 +240,16 @@ def validate_document(path: Path, profile: dict | None = None, classifications: 
             actual_bold = bold is not None and bold.get(qn("w:val"), "1") not in {"0", "false", "off"}
             if actual_bold is not page_spec["bold"]:
                 errors.append("Page number has an incorrect bold setting")
+            field_color = r_pr.find("./w:color", namespaces={"w": W_NS}) if r_pr is not None else None
+            if field_color is None or field_color.get(qn("w:val"), "").upper() != "000000":
+                errors.append("Page number is not black")
+            for run in paragraph.findall(".//w:r", namespaces={"w": W_NS}) if paragraph is not None else []:
+                if not run.findall(".//w:t", namespaces={"w": W_NS}):
+                    continue
+                run_color = run.find("./w:rPr/w:color", namespaces={"w": W_NS})
+                if run_color is None or run_color.get(qn("w:val"), "").upper() != "000000":
+                    errors.append("Page-number decoration is not black")
+                    break
         expected_alignments = {"right", "left"} if profile["page"]["print_mode"] == "duplex" else {"center"}
         if not expected_alignments.issubset(footer_alignments):
             errors.append("Page-number footer alignment is incorrect")
