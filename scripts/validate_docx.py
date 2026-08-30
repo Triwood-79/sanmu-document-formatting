@@ -68,8 +68,17 @@ def validate_run_font(run, label: str, spec: dict, errors: list[str]) -> bool:
     return True
 
 
-def validate_font_only(paragraph, label: str, spec: dict, errors: list[str]) -> None:
+def validate_font_only(
+    paragraph,
+    label: str,
+    spec: dict,
+    errors: list[str],
+    expected_bold: bool | None = None,
+) -> None:
     for run in (run for run in paragraph.runs if run.text):
+        if expected_bold is not None and run.font.bold is not expected_bold:
+            errors.append(f"{label} has an incorrect bold setting")
+            break
         if not validate_run_font(run, label, spec, errors):
             break
 
@@ -119,6 +128,7 @@ def validate_tables(document: Document, table_specs: list[dict], profile: dict, 
                 f"Table {table_index} title paragraph {title_index}",
                 profile["styles"]["main_title"],
                 errors,
+                profile["global"]["bold"],
             )
         table = document.tables[table_index]
         header_rows = table_spec["header_rows"]
@@ -136,6 +146,7 @@ def validate_tables(document: Document, table_specs: list[dict], profile: dict, 
                         f"Table {table_index} row {row_index} cell {cell_index} paragraph {paragraph_index}",
                         profile["styles"][role],
                         errors,
+                        profile["global"]["bold"],
                     )
 
 

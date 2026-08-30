@@ -239,6 +239,8 @@ class SkillTests(unittest.TestCase):
         self.assertIn(run_east_asia_font(formatted.tables[0].cell(1, 0).paragraphs[0].runs[0]), {"方正仿宋_GBK", "仿宋_GB2312", "FangSong_GB2312", "FangSong"})
         self.assertEqual(run_color(formatted.tables[0].cell(0, 0).paragraphs[0].runs[0]), "000000")
         self.assertEqual(run_color(formatted.tables[0].cell(1, 0).paragraphs[0].runs[0]), "000000")
+        self.assertTrue(formatted.tables[0].cell(0, 0).paragraphs[0].runs[0].font.bold)
+        self.assertTrue(formatted.tables[0].cell(1, 0).paragraphs[0].runs[0].font.bold)
         with zipfile.ZipFile(source) as before, zipfile.ZipFile(output) as after:
             before_media = {name: before.read(name) for name in before.namelist() if name.startswith("word/media/")}
             after_media = {name: after.read(name) for name in after.namelist() if name.startswith("word/media/")}
@@ -282,6 +284,93 @@ class SkillTests(unittest.TestCase):
         self.assertIn(run_east_asia_font(header2_run), {"方正楷体_GBK", "楷体_GB2312", "楷体GB2312", "KaiTi_GB2312", "KaiTi"})
         self.assertIn(run_east_asia_font(body_run), {"方正仿宋_GBK", "仿宋_GB2312", "仿宋GB2312", "FangSong_GB2312", "FangSong"})
         self.assertTrue(all(run_color(run) == "000000" for run in (title_run, header1_run, header2_run, body_run)))
+        self.assertTrue(all(run.font.bold for run in (title_run, header1_run, header2_run, body_run)))
+
+    def test_classification_cleanup_requires_confirmation_and_matching_hash(self) -> None:
+        source = self.root / "cleanup-source.docx"
+        output = self.root / "cleanup-output.docx"
+        document = Document()
+        document.add_paragraph("示例标题")
+        document.save(source)
+        document.save(output)
+        mapping = self.root / "classification.json"
+        payload = {
+            "classifications": [{"index": 0, "role": "main_title"}],
+            "tables": [{"index": 0, "header_rows": 1}],
+        }
+        mapping.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+        eligible = json.loads(
+            self.run_script(
+                "cleanup_classification.py",
+                "--classification",
+                mapping,
+                "--input",
+                source,
+                "--output",
+                output,
+            ).stdout
+        )
+        self.assertTrue(eligible["eligible"])
+        self.assertFalse(eligible["deleted"])
+        self.assertTrue(eligible["confirmation_required"])
+        self.assertTrue(mapping.exists())
+
+        stale_hash = eligible["sha256"]
+        mapping.write_text(json.dumps({**payload, "reviewed": True}, ensure_ascii=False), encoding="utf-8")
+        refused = self.run_script(
+            "cleanup_classification.py",
+            "--classification",
+            mapping,
+            "--input",
+            source,
+            "--output",
+            output,
+            "--confirmed",
+            "--expected-sha256",
+            stale_hash,
+            check=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertTrue(mapping.exists())
+
+        current = json.loads(
+            self.run_script(
+                "cleanup_classification.py",
+                "--classification",
+                mapping,
+                "--input",
+                source,
+                "--output",
+                output,
+            ).stdout
+        )
+        deleted = json.loads(
+            self.run_script(
+                "cleanup_classification.py",
+                "--classification",
+                mapping,
+                "--input",
+                source,
+                "--output",
+                output,
+                "--confirmed",
+                "--expected-sha256",
+                current["sha256"],
+            ).stdout
+        )
+        self.assertTrue(deleted["deleted"])
+        self.assertFalse(mapping.exists())
+
+    def test_package_uses_declared_skill_name_as_archive_root(self) -> None:
+        output = self.root / "renamed-clone.zip"
+        result = json.loads(self.run_script("package_skill.py", "--output", output).stdout)
+        self.assertTrue(result["created"])
+        with zipfile.ZipFile(output) as archive:
+            names = archive.namelist()
+        self.assertTrue(names)
+        self.assertTrue(all(name.startswith("official-document-formatting/") for name in names))
+        self.assertIn("official-document-formatting/SKILL.md", names)
 
     def test_legacy_extension_and_tracked_changes_are_blocked(self) -> None:
         document = Document()

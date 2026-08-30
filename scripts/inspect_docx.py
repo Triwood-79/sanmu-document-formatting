@@ -177,7 +177,7 @@ def inspect_document(path: Path) -> dict:
     if colophon_count:
         warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
     if document.tables:
-        warnings.append("Table fonts and text color will be normalized; borders, shading, alignment, sizes, row heights, and column widths will be preserved")
+        warnings.append("Table fonts, text color, and the global bold setting will be normalized; borders, shading, alignment, sizes, spacing, row heights, and column widths will be preserved")
     if drawing_count or textbox_count:
         warnings.append("Complex elements will be preserved without internal reformatting")
 

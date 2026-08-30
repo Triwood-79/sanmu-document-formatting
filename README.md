@@ -15,7 +15,7 @@
 | 第一次使用要填很多参数吗？ | 不用。第一次直接采用内置通用格式。 |
 | 能记住我单位的格式吗？ | 可以。只有你主动修改并发送“确认保存”后，个性化格式才会长期生效。 |
 | 能处理哪些文件？ | 新建或处理 `.docx`。`.doc`、`.docm` 需要先另存为 `.docx`。 |
-| 表格、图片和文本框会怎样？ | 表格只统一字体族和黑色文字，其余版式保留；图片和文本框原样保留并提醒人工检查。 |
+| 表格、图片和文本框会怎样？ | 表格统一字体族、黑色文字和全局加粗设置，其余版式保留；图片和文本框原样保留并提醒人工检查。 |
 | 字体没装齐怎么办？ | 自动尝试替代字体并给出提示，不会偷偷下载字体。 |
 | 文档内容会写进长期配置吗？ | 不会。长期配置只保存排版参数，不保存正文、姓名、单位、日期或文件路径。 |
 | 会把文档上传到其他地方吗？ | 这个 Skill 的处理脚本在本机运行，不含上传功能；Codex 服务本身如何处理数据，请以你所用版本和账号的相关设置为准。 |
@@ -58,7 +58,7 @@ npx -y skills add Triwood-79/official-document-formatting -g -a codex -y --copy
 1. 打开 [GitHub 仓库](https://github.com/Triwood-79/official-document-formatting)，先阅读 `README.md` 和 `SKILL.md`。
 2. 下载 ZIP，解压到一个临时文件夹，不要直接放进 Codex 技能目录。
 3. 请 Codex 检查文件清单，运行隐私扫描和自动化测试。
-4. 检查通过后，再把整个文件夹复制到 Codex 的全局技能目录。默认位置是 `%USERPROFILE%\.codex\skills\official-document-formatting`；设置过 `CODEX_HOME` 时使用 `%CODEX_HOME%\skills\official-document-formatting`。
+4. 检查通过后，再把整个文件夹复制到 Codex 可识别的个人 Skill 目录。当前官方文档列出的用户级目录是 `%USERPROFILE%\.agents\skills\official-document-formatting`；使用 Codex 内置 Skill Installer 时，也可能安装到 `%CODEX_HOME%\skills\official-document-formatting`（未设置 `CODEX_HOME` 时通常位于 `%USERPROFILE%\.codex\skills`）。以安装工具返回的实际路径为准，不要同时维护两份可变源代码。
 5. 新建一个 Codex 任务，用“查看当前排版格式”验证是否安装成功。
 
 也可以把下面这段话发给 Codex，让它在每一步完成后向你报告：
@@ -175,7 +175,7 @@ Skill 会先告诉你识别到了哪些主标题、标题、正文和说明内�
 - 只直接处理 `.docx`。旧版 `.doc` 和带宏的 `.docm` 请先另存为 `.docx`。
 - 带批注、修订、加密或文档保护的文件，需要先提供一份已处理完成的干净副本。
 - 排版后的普通文字统一为黑色，不再保留原文中的蓝色、红色或主题色。
-- 表格会统一字体族和文字颜色：表题用方正小标宋，第一层表头用方正黑体，第二层表头用方正楷体，表格正文用方正仿宋；字号、粗体、对齐、行距、边框、底纹、行高和列宽保持原样。执行前会展示表题候选和表头层数供确认。
+- 表格会统一字体族、文字颜色和全局加粗设置：表题用方正小标宋，第一层表头用方正黑体，第二层表头用方正楷体，表格正文用方正仿宋；字号、对齐、行距、边框、底纹、行高和列宽保持原样。执行前会展示表题候选和表头层数供确认。
 - 图片、文本框和特殊横向页面会保留，但不自动统一内部格式。
 - V1 不新建或重构完整的版记结构；已有印发机关和印发日期行仅统一为方正仿宋、Times New Roman 和黑色，原字号、粗体、对齐、段距、分隔线及位置保持不变，复杂布局仍需人工完成。
 - Skill 负责识别结构和排版，不负责补写事实或推测缺失信息。
@@ -254,6 +254,26 @@ python scripts\docx_engine.py format-existing `
   --input input.docx `
   --classification classification.json `
   --confirmed
+```
+
+分类文件默认保留。用户明确要求删除时，先做只读校验：
+
+```powershell
+python scripts\cleanup_classification.py `
+  --classification classification.json `
+  --input input.docx `
+  --output input_排版后.docx
+```
+
+展示校验结果并再次确认后，使用上一步返回的 SHA-256 删除；文件一旦变化就会拒绝：
+
+```powershell
+python scripts\cleanup_classification.py `
+  --classification classification.json `
+  --input input.docx `
+  --output input_排版后.docx `
+  --confirmed `
+  --expected-sha256 <上一步返回的 SHA-256>
 ```
 
 运行自动化测试：

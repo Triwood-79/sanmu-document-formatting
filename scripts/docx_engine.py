@@ -179,9 +179,11 @@ def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str]) -> No
         set_run_black(run)
 
 
-def apply_font_only(paragraph, spec: dict, font_name: str) -> None:
+def apply_font_only(paragraph, spec: dict, font_name: str, bold: bool | None = None) -> None:
     for run in paragraph.runs:
         run.font.name = spec["font_latin"]
+        if bold is not None:
+            run.font.bold = bold
         set_rfonts(run, font_name, spec["font_latin"])
         set_run_black(run)
 
@@ -190,7 +192,12 @@ def apply_table_format(document: Document, table_specs: list[dict], profile: dic
     for table_spec in table_specs:
         title_index = table_spec.get("title_paragraph_index")
         if title_index is not None:
-            apply_font_only(document.paragraphs[title_index], profile["styles"]["main_title"], fonts["main_title"])
+            apply_font_only(
+                document.paragraphs[title_index],
+                profile["styles"]["main_title"],
+                fonts["main_title"],
+                profile["global"]["bold"],
+            )
         table = document.tables[table_spec["index"]]
         header_rows = table_spec["header_rows"]
         for row_index, row in enumerate(table.rows):
@@ -203,7 +210,7 @@ def apply_table_format(document: Document, table_specs: list[dict], profile: dic
             spec = profile["styles"][role]
             for cell in row.cells:
                 for paragraph in cell.paragraphs:
-                    apply_font_only(paragraph, spec, fonts[role])
+                    apply_font_only(paragraph, spec, fonts[role], profile["global"]["bold"])
 
 
 def apply_page_setup(document: Document, profile: dict, warnings: list[str]) -> None:

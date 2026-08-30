@@ -26,17 +26,18 @@ Never treat an ordinary per-document instruction as a persistent profile change.
 3. If `python-docx` or `lxml` is missing, explain the missing capability and request authorization before installation. Never install software or fonts silently.
 4. For existing files, refuse `.doc` and `.docm`. Stop on corrupt, encrypted, commented, or tracked-change documents and request a clean `.docx` copy.
 5. Never overwrite an input file. The engine creates `<stem>_排版后.docx`, adding a numeric suffix when needed.
-6. Normalize all processed text to black. For tables, normalize font families and text color only; preserve font sizes, bold settings, alignment, spacing, borders, shading, row heights, and column widths. Preserve pictures, text boxes, and unusual landscape sections without internal normalization.
+6. Normalize all processed text to black. For tables, normalize font families, text color, and the confirmed global bold setting; preserve font sizes, alignment, spacing, borders, shading, row heights, and column widths. Preserve pictures, text boxes, and unusual landscape sections without internal normalization.
 7. V1 does not create or rebuild complete colophon structures. Classify an existing issuance-office/date line as `colophon`, normalize only its Chinese/Latin font families to the body fonts and its text color to black, and preserve its size, bold setting, alignment, spacing, separators, and placement. Tell the user that complex colophon layout still requires manual completion.
 8. Run `scripts/privacy_scrub.py` and `scripts/validate_docx.py` on every output.
 9. Use `scripts/render_docx.py` only when a supported renderer is detected. Without rendering, report structural validation only, never visual approval.
+10. Keep the classification JSON after formatting unless the user explicitly asks to delete it. Before deletion, run `scripts/cleanup_classification.py` without `--confirmed`, show the eligibility result, and obtain confirmation. After confirmation, rerun it with `--confirmed --expected-sha256 <sha256>`. If validation or the hash check fails, keep the file and report the refusal.
 
 ## Table formatting
 
-- If a table has a confirmed title paragraph, use the main-title Chinese and Latin font families and set its text to black; preserve its other paragraph formatting.
-- Use the heading-1 font families and black text for the first header row.
-- If a second header row is confirmed, use the heading-2 font families and black text for that row.
-- Use the body font families and black text for all remaining table rows.
+- If a table has a confirmed title paragraph, use the main-title Chinese and Latin font families, black text, and the confirmed global bold setting; preserve its size and other paragraph geometry.
+- Use the heading-1 font families, black text, and the global bold setting for the first header row.
+- If a second header row is confirmed, use the heading-2 font families, black text, and the global bold setting for that row.
+- Use the body font families, black text, and the global bold setting for all remaining table rows.
 - Inspection proposes one header row by default and proposes two only when the first row has merged cells or the second row is marked as a repeating header. Always show the proposal before formatting so the user can correct it.
 
 ## Profile questions
