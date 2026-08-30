@@ -36,7 +36,7 @@ npx skills add https://github.com/Triwood-79/official-document-formatting --skil
 
 安装器会检测本机已有的兼容 Agent，并让你选择安装目标。`-g` 表示安装到用户级目录，安装后可以在不同项目中使用。
 
-这条命令需要电脑已经安装 Node.js。仓库为 Private 时，安装者还需要拥有仓库访问权限并在本机登录 GitHub；仓库改为 Public 后可直接安装。
+这条命令需要电脑已经安装 Node.js。首次运行时，`npx` 可能会提示下载 `skills` 命令行工具，确认后即可继续。
 
 通用安装器当前没有把 WorkBuddy 列为独立安装目标。WorkBuddy 用户需要按照其官方说明，将整个 Skill 文件夹安装到它能够识别的用户级 Skills 目录，并检查 `SKILL.md`、`scripts/`、`assets/`、`references/` 是否完整。
 
