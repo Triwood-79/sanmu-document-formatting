@@ -17,6 +17,7 @@ ALLOWED_ROLES = {
     "body",
     "reference_note",
     "description",
+    "signature",
     "colophon",
     "skip",
 }

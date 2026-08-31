@@ -19,6 +19,8 @@ Use this skill to create or reformat `.docx` files without Microsoft Word. Use t
 
 Never treat an ordinary per-document instruction as a persistent profile change. Precedence is: current-request overrides, confirmed user profile, built-in preset.
 
+For new text, `[落款]` can explicitly mark the issuing unit and date. The engine also recognizes a final short unit line followed by a standalone date. A main title must be followed by one body-formatted blank line. A signature block must be preceded by one blank line and must be centered inside the fixed right-side signature region, not aligned to the full page.
+
 ## Required workflow
 
 1. Read [references/format-fields.md](references/format-fields.md) when creating, reformatting, or changing parameters.
@@ -27,7 +29,7 @@ Never treat an ordinary per-document instruction as a persistent profile change.
 4. For existing files, refuse `.doc` and `.docm`. Stop on corrupt, encrypted, commented, or tracked-change documents and request a clean `.docx` copy.
 5. Never overwrite an input file. The engine creates `<stem>_排版后.docx`, adding a numeric suffix when needed.
 6. Normalize all processed text to black. For tables, normalize font families, text color, and the confirmed global bold setting; preserve font sizes, alignment, spacing, borders, shading, row heights, and column widths. Preserve pictures, text boxes, and unusual landscape sections without internal normalization.
-7. V1 does not create or rebuild complete colophon structures. Classify an existing issuance-office/date line as `colophon`, normalize only its Chinese/Latin font families to the body fonts and its text color to black, and preserve its size, bold setting, alignment, spacing, separators, and placement. Tell the user that complex colophon layout still requires manual completion.
+7. Treat a document-ending issuing-unit plus standalone-date pair as `signature`; this is distinct from a print colophon. V1 does not create or rebuild complete colophon structures. Classify an existing issuance-office/date line ending in “印发” as `colophon`, normalize only its Chinese/Latin font families to the body fonts and its text color to black, and preserve its size, bold setting, alignment, spacing, separators, and placement. Tell the user that complex colophon layout still requires manual completion.
 8. Run `scripts/privacy_scrub.py` and `scripts/validate_docx.py` on every output.
 9. Use `scripts/render_docx.py` only when a supported renderer is detected. Without rendering, report structural validation only, never visual approval.
 10. Keep the classification JSON after formatting unless the user explicitly asks to delete it. Before deletion, run `scripts/cleanup_classification.py` without `--confirmed`, show the eligibility result, and obtain confirmation. After confirmation, rerun it with `--confirmed --expected-sha256 <sha256>`. If validation or the hash check fails, keep the file and report the refusal.

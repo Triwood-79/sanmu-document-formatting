@@ -21,6 +21,7 @@ H2_RE = re.compile(r"^（[一二三四五六七八九十百]+）")
 DATE_RE = re.compile(r"^(?:\d{4}年\d{1,2}月\d{1,2}日|某年某月某日)$")
 NOTE_RE = re.compile(r"^(?:（.*）|\(.*\))$", re.DOTALL)
 COLOPHON_RE = re.compile(r"(?:\d{4}年\d{1,2}月\d{1,2}日|某年某月某日)\s*印发[。．.]?$")
+SIGNATURE_OFFICE_RE = re.compile(r"(?:单位|办公室|委员会|人民政府|政府|局|厅|部|院|中心|公司|集团|学校|协会|研究院)$")
 ALLOWED_EXTENSIONS = {".docx"}
 TABLE_TITLE_SUFFIXES = ("统计表", "一览表", "明细表", "安排表", "情况表", "汇总表", "清单")
 STYLE_ROLES = {
@@ -30,6 +31,7 @@ STYLE_ROLES = {
     "ODF Body": "body",
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
+    "ODF Signature": "signature",
     "ODF Colophon": "colophon",
 }
 
@@ -63,6 +65,7 @@ def classify_paragraphs(document: Document) -> list[dict]:
     tail_indices = set(nonempty[-5:])
     title_index = nonempty[0] if nonempty else None
     description_indices: set[int] = set()
+    signature_indices: set[int] = set()
     if title_index is not None:
         after = [index for index in nonempty if index > title_index][:2]
         if after:
@@ -72,10 +75,26 @@ def classify_paragraphs(document: Document) -> list[dict]:
                 if len(document.paragraphs[after[0]].text.strip()) <= 40:
                     description_indices.add(after[0])
                 description_indices.add(after[1])
+    if len(nonempty) >= 2:
+        date_index = nonempty[-1]
+        office_index = nonempty[-2]
+        office_text = document.paragraphs[office_index].text.strip()
+        if (
+            DATE_RE.fullmatch(document.paragraphs[date_index].text.strip())
+            and office_index != title_index
+            and len(office_text) <= 40
+            and SIGNATURE_OFFICE_RE.search(office_text)
+            and not H1_RE.match(office_text)
+            and not H2_RE.match(office_text)
+            and not NOTE_RE.fullmatch(office_text)
+        ):
+            signature_indices.update({office_index, date_index})
     for index, paragraph in enumerate(document.paragraphs):
         text = paragraph.text.strip()
         styled_role = STYLE_ROLES.get(paragraph.style.name)
-        if styled_role:
+        if index in signature_indices and styled_role in {None, "body", "signature"}:
+            role = "signature"
+        elif styled_role:
             role = styled_role
         elif not text:
             role = "skip"

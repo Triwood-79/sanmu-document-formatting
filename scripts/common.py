@@ -14,6 +14,8 @@ PRESET_PATH = SKILL_ROOT / "assets" / "presets" / "generic_official_v1.json"
 STATE_NAME = "official-document-formatting"
 ALIGNMENT_VALUES = {"left", "center", "right", "justify"}
 PRINT_MODE_VALUES = {"single", "duplex"}
+SIGNATURE_LEFT_TWIPS = 6160
+SIGNATURE_LEFT_CHARS = 2800
 STYLE_FIELDS = {
     "font_cn",
     "font_fallback",
@@ -99,6 +101,13 @@ def active_profile(extra_override: dict[str, Any] | None = None) -> dict[str, An
         validate_override(extra_override, load_preset())
         preset = deep_merge(preset, extra_override)
     return preset
+
+
+def signature_style_spec(profile: dict[str, Any]) -> dict[str, Any]:
+    """Use body typography while fixing the signature block geometry."""
+    spec = copy.deepcopy(profile["styles"]["body"])
+    spec.update({"alignment": "center", "first_line_chars": 0, "space_before_pt": 0})
+    return spec
 
 
 def validate_override(override: dict[str, Any], schema: dict[str, Any] | None = None, prefix: str = "") -> None:

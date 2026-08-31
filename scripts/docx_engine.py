@@ -13,8 +13,18 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt, RGBColor
+from docx.text.paragraph import Paragraph
 
-from common import active_profile, choose_output_path, configure_utf8_stdio, read_json, unique_output_path
+from common import (
+    SIGNATURE_LEFT_CHARS,
+    SIGNATURE_LEFT_TWIPS,
+    active_profile,
+    choose_output_path,
+    configure_utf8_stdio,
+    read_json,
+    signature_style_spec,
+    unique_output_path,
+)
 from inspect_docx import analyze_tables, classify_paragraphs, inspect_document
 from privacy_scrub import scrub_docx
 from validate_docx import validate_document
@@ -27,6 +37,7 @@ ROLE_NAMES = {
     "body": "ODF Body",
     "reference_note": "ODF Reference Note",
     "description": "ODF Description",
+    "signature": "ODF Signature",
 }
 ALIGNMENTS = {
     "left": WD_ALIGN_PARAGRAPH.LEFT,
@@ -142,9 +153,20 @@ def set_paragraph_geometry(paragraph, spec: dict) -> None:
     ind.set(qn("w:firstLineChars"), str(round(spec["first_line_chars"] * 100)))
 
 
+def set_signature_geometry(paragraph, spec: dict) -> None:
+    set_paragraph_geometry(paragraph, spec)
+    p_pr = paragraph._p.get_or_add_pPr()
+    ind = p_pr.get_or_add_ind()
+    ind.set(qn("w:left"), str(SIGNATURE_LEFT_TWIPS))
+    ind.set(qn("w:leftChars"), str(SIGNATURE_LEFT_CHARS))
+    ind.set(qn("w:firstLine"), "0")
+    ind.set(qn("w:firstLineChars"), "0")
+
+
 def ensure_styles(document: Document, profile: dict, fonts: dict[str, str]) -> None:
     for role, style_name in ROLE_NAMES.items():
-        spec = profile["styles"][role]
+        spec = signature_style_spec(profile) if role == "signature" else profile["styles"][role]
+        font_role = "body" if role == "signature" else role
         try:
             style = document.styles[style_name]
         except KeyError:
@@ -153,7 +175,7 @@ def ensure_styles(document: Document, profile: dict, fonts: dict[str, str]) -> N
         style.font.size = Pt(spec["size_pt"])
         style.font.bold = profile["global"]["bold"]
         style.font.color.rgb = RGBColor(0, 0, 0)
-        set_rfonts(style, fonts[role], spec["font_latin"])
+        set_rfonts(style, fonts[font_role], spec["font_latin"])
         style.paragraph_format.alignment = ALIGNMENTS[spec["alignment"]]
         style.paragraph_format.space_before = Pt(spec["space_before_pt"])
         style.paragraph_format.space_after = Pt(0)
@@ -168,14 +190,18 @@ def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str]) -> No
         return
     if role not in ROLE_NAMES:
         raise ValueError(f"Unsupported paragraph role: {role}")
-    spec = profile["styles"][role]
+    spec = signature_style_spec(profile) if role == "signature" else profile["styles"][role]
+    font_role = "body" if role == "signature" else role
     paragraph.style = ROLE_NAMES[role]
-    set_paragraph_geometry(paragraph, spec)
+    if role == "signature":
+        set_signature_geometry(paragraph, spec)
+    else:
+        set_paragraph_geometry(paragraph, spec)
     for run in paragraph.runs:
         run.font.name = spec["font_latin"]
         run.font.size = Pt(spec["size_pt"])
         run.font.bold = profile["global"]["bold"]
-        set_rfonts(run, fonts[role], spec["font_latin"])
+        set_rfonts(run, fonts[font_role], spec["font_latin"])
         set_run_black(run)
 
 
@@ -362,6 +388,71 @@ def load_format_map(path: str | None, document: Document) -> tuple[list[dict], l
     return items, table_specs
 
 
+def _classification_at(classifications: list[dict], index: int) -> dict | None:
+    return next((item for item in classifications if item["index"] == index), None)
+
+
+def _shift_paragraph_indexes(classifications: list[dict], table_specs: list[dict], insertion_index: int) -> None:
+    for item in classifications:
+        if item["index"] >= insertion_index:
+            item["index"] += 1
+    for item in table_specs:
+        title_index = item.get("title_paragraph_index")
+        if title_index is not None and title_index >= insertion_index:
+            item["title_paragraph_index"] += 1
+
+
+def _add_blank_classification(classifications: list[dict], index: int, role: str) -> None:
+    item = _classification_at(classifications, index)
+    if item is None:
+        classifications.append({"index": index, "role": role, "text_preview": ""})
+    else:
+        item["role"] = role
+        item["text_preview"] = ""
+    classifications.sort(key=lambda entry: entry["index"])
+
+
+def _insert_blank_after(document: Document, index: int) -> None:
+    paragraph = document.paragraphs[index]
+    element = OxmlElement("w:p")
+    paragraph._p.addnext(element)
+    Paragraph(element, paragraph._parent)
+
+
+def _insert_blank_before(document: Document, index: int) -> None:
+    paragraph = document.paragraphs[index]
+    element = OxmlElement("w:p")
+    paragraph._p.addprevious(element)
+    Paragraph(element, paragraph._parent)
+
+
+def ensure_required_spacing(document: Document, classifications: list[dict], table_specs: list[dict]) -> None:
+    title_item = next((item for item in classifications if item["role"] == "main_title"), None)
+    if title_item is not None:
+        title_index = title_item["index"]
+        title_paragraph = document.paragraphs[title_index]
+        following = title_paragraph._p.getnext()
+        if following is not None and following.tag == qn("w:p") and not Paragraph(following, title_paragraph._parent).text.strip():
+            _add_blank_classification(classifications, title_index + 1, "body")
+        else:
+            insertion_index = title_index + 1
+            _shift_paragraph_indexes(classifications, table_specs, insertion_index)
+            _insert_blank_after(document, title_index)
+            _add_blank_classification(classifications, insertion_index, "body")
+
+    signature_items = [item for item in classifications if item["role"] == "signature"]
+    if signature_items:
+        first_index = min(item["index"] for item in signature_items)
+        first_paragraph = document.paragraphs[first_index]
+        preceding = first_paragraph._p.getprevious()
+        if preceding is not None and preceding.tag == qn("w:p") and not Paragraph(preceding, first_paragraph._parent).text.strip():
+            _add_blank_classification(classifications, first_index - 1, "signature")
+        else:
+            _shift_paragraph_indexes(classifications, table_specs, first_index)
+            _insert_blank_before(document, first_index)
+            _add_blank_classification(classifications, first_index, "signature")
+
+
 def apply_document_format(document: Document, classifications: list[dict], table_specs: list[dict], profile: dict) -> list[str]:
     fonts, page_font, warnings = resolve_fonts(profile)
     ensure_styles(document, profile, fonts)
@@ -409,6 +500,8 @@ def add_text(document: Document, text: str) -> list[dict]:
             role, line = "main_title", line[2:].strip()
         elif line.startswith("[说明]"):
             role, line = "description", line[4:].strip()
+        elif line.startswith("[落款]"):
+            role, line = "signature", line[4:].strip()
         elif line.startswith("[版记]"):
             role, line = "colophon", line[4:].strip()
         paragraph = document.add_paragraph(line)
@@ -423,6 +516,7 @@ def add_text(document: Document, text: str) -> list[dict]:
 
 def finalize(document: Document, output: Path, profile: dict, classifications: list[dict], table_specs: list[dict]) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
+    ensure_required_spacing(document, classifications, table_specs)
     warnings = apply_document_format(document, classifications, table_specs, profile)
     document.save(output)
     scrub_docx(output)

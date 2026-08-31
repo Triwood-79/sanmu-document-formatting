@@ -72,6 +72,7 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(profile["page_number"]["size_pt"], 14)
         self.assertTrue(profile["global"]["bold"])
         self.assertNotIn("colophon", profile["styles"])
+        self.assertNotIn("signature", profile["styles"])
 
     def test_cli_forces_utf8_output_even_when_python_defaults_to_gbk(self) -> None:
         env = self.env.copy()
@@ -139,6 +140,90 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(any(b"PAGE" in footer for footer in footers))
         self.assertTrue(any(b'w:jc w:val="right"' in footer for footer in footers))
         self.assertTrue(any(b'w:jc w:val="left"' in footer for footer in footers))
+
+    def test_create_inserts_title_blank_line_and_formats_signature_block(self) -> None:
+        output = self.root / "signature-created.docx"
+        text = "# 示例公文标题\n各相关部门：\n这是正文。\n某测试单位办公室\n2026年8月31日"
+        result = json.loads(self.run_script("docx_engine.py", "create", "--text", text, "--output", output).stdout)
+        self.assertEqual(result["validation"], "structural_pass")
+
+        document = Document(output)
+        self.assertEqual(document.paragraphs[1].text, "")
+        self.assertEqual(document.paragraphs[1].style.name, "ODF Body")
+        self.assertEqual(document.paragraphs[-3].text, "")
+        self.assertTrue(all(paragraph.style.name == "ODF Signature" for paragraph in document.paragraphs[-3:]))
+        self.assertEqual(document.paragraphs[-2].text, "某测试单位办公室")
+        self.assertEqual(document.paragraphs[-1].text, "2026年8月31日")
+        for paragraph in document.paragraphs[-3:]:
+            ind = paragraph._p.pPr.ind
+            self.assertEqual(ind.get(qn("w:left")), "6160")
+            self.assertEqual(ind.get(qn("w:leftChars")), "2800")
+            self.assertEqual(ind.get(qn("w:firstLine")), "0")
+            self.assertEqual(ind.get(qn("w:firstLineChars")), "0")
+            self.assertEqual(paragraph.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        report = validate_document(output, load_preset())
+        self.assertTrue(report["valid"], report["errors"])
+
+    def test_existing_document_adds_required_blank_lines_and_signature_geometry(self) -> None:
+        source = self.root / "signature-source.docx"
+        document = Document()
+        document.add_paragraph("示例公文标题")
+        document.add_paragraph("这是正文。")
+        document.add_paragraph("某测试单位办公室")
+        document.add_paragraph("2026年8月31日")
+        document.save(source)
+
+        inspection = inspect_document(source)
+        self.assertEqual([item["role"] for item in inspection["classifications"][-2:]], ["signature", "signature"])
+        mapping = self.root / "signature-map.json"
+        mapping.write_text(
+            json.dumps({"classifications": inspection["classifications"], "tables": []}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        output = self.root / "signature-formatted.docx"
+        self.run_script(
+            "docx_engine.py",
+            "format-existing",
+            "--input",
+            source,
+            "--output",
+            output,
+            "--classification",
+            mapping,
+            "--confirmed",
+        )
+
+        formatted = Document(output)
+        self.assertEqual([paragraph.text for paragraph in formatted.paragraphs], [
+            "示例公文标题",
+            "",
+            "这是正文。",
+            "",
+            "某测试单位办公室",
+            "2026年8月31日",
+        ])
+        self.assertTrue(all(paragraph.style.name == "ODF Signature" for paragraph in formatted.paragraphs[-3:]))
+        self.assertEqual([paragraph.text for paragraph in Document(source).paragraphs], [
+            "示例公文标题",
+            "这是正文。",
+            "某测试单位办公室",
+            "2026年8月31日",
+        ])
+
+    def test_validator_rejects_missing_title_blank_line_and_bad_signature_position(self) -> None:
+        output = self.root / "signature-invalid.docx"
+        text = "# 示例公文标题\n这是正文。\n[落款]某测试单位办公室\n[落款]2026年8月31日"
+        self.run_script("docx_engine.py", "create", "--text", text, "--output", output)
+        document = Document(output)
+        document.paragraphs[1].text = "不应出现的文字"
+        document.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        document.save(output)
+        scrub_docx(output)
+
+        report = validate_document(output, load_preset())
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("not followed by a blank line" in error for error in report["errors"]))
+        self.assertTrue(any("incorrect alignment" in error for error in report["errors"]))
 
     def test_existing_output_path_gets_numeric_suffix(self) -> None:
         existing = self.root / "named-output.docx"
@@ -288,7 +373,7 @@ class SkillTests(unittest.TestCase):
         self.run_script("docx_engine.py", "format-existing", "--input", source, "--output", output, "--classification", mapping, "--confirmed")
 
         formatted = Document(output)
-        title_run = formatted.paragraphs[2].runs[0]
+        title_run = next(paragraph.runs[0] for paragraph in formatted.paragraphs if paragraph.text == "测试任务安排表")
         header1_run = formatted.tables[0].cell(0, 0).paragraphs[0].runs[0]
         header2_run = formatted.tables[0].cell(1, 0).paragraphs[0].runs[0]
         body_run = formatted.tables[0].cell(2, 0).paragraphs[0].runs[0]
@@ -341,7 +426,7 @@ class SkillTests(unittest.TestCase):
 
         formatted = Document(output)
         runs = (
-            formatted.paragraphs[2].runs[0],
+            next(paragraph.runs[0] for paragraph in formatted.paragraphs if paragraph.text == "测试任务安排表"),
             formatted.tables[0].cell(0, 0).paragraphs[0].runs[0],
             formatted.tables[0].cell(1, 0).paragraphs[0].runs[0],
             formatted.tables[0].cell(2, 0).paragraphs[0].runs[0],

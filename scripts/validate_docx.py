@@ -11,7 +11,14 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from lxml import etree
 
-from common import active_profile, configure_utf8_stdio, read_json
+from common import (
+    SIGNATURE_LEFT_CHARS,
+    SIGNATURE_LEFT_TWIPS,
+    active_profile,
+    configure_utf8_stdio,
+    read_json,
+    signature_style_spec,
+)
 from inspect_docx import analyze_tables, classify_paragraphs
 
 
@@ -22,6 +29,7 @@ STYLE_ROLES = {
     "ODF Body": "body",
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
+    "ODF Signature": "signature",
     "ODF Colophon": "colophon",
 }
 ROLE_STYLES = {role: style for style, role in STYLE_ROLES.items() if role not in {"colophon", "skip"}}
@@ -118,6 +126,20 @@ def validate_paragraph(paragraph, index: int, role: str, spec: dict, global_bold
             break
 
 
+def validate_signature_paragraph(paragraph, index: int, profile: dict, errors: list[str]) -> None:
+    spec = signature_style_spec(profile)
+    validate_paragraph(paragraph, index, "signature", spec, profile["global"]["bold"], errors)
+    p_pr = paragraph._p.pPr
+    ind = p_pr.ind if p_pr is not None else None
+    left = int(ind.get(qn("w:left"))) if ind is not None and ind.get(qn("w:left")) else None
+    left_chars = int(ind.get(qn("w:leftChars"))) if ind is not None and ind.get(qn("w:leftChars")) else None
+    first_line = int(ind.get(qn("w:firstLine"))) if ind is not None and ind.get(qn("w:firstLine")) else 0
+    if left != SIGNATURE_LEFT_TWIPS or left_chars != SIGNATURE_LEFT_CHARS:
+        errors.append(f"Paragraph {index} (signature) has incorrect right-side block positioning")
+    if first_line != 0:
+        errors.append(f"Paragraph {index} (signature) has an incorrect first-line indent")
+
+
 def validate_tables(document: Document, table_specs: list[dict], profile: dict, errors: list[str]) -> None:
     for table_spec in table_specs:
         table_index = table_spec["index"]
@@ -193,6 +215,27 @@ def validate_document(
         if classifications is not None
         else {item["index"]: item["role"] for item in classify_paragraphs(document)}
     )
+    title_indices = sorted(index for index, role in expected_roles.items() if role == "main_title")
+    for index in title_indices:
+        spacer_index = index + 1
+        if spacer_index >= len(document.paragraphs) or document.paragraphs[spacer_index].text.strip():
+            errors.append(f"Paragraph {index} (main_title) is not followed by a blank line")
+        elif expected_roles.get(spacer_index) != "body":
+            errors.append(f"Paragraph {index} (main_title) blank line is not body-formatted")
+
+    signature_content = sorted(
+        index
+        for index, role in expected_roles.items()
+        if role == "signature" and index < len(document.paragraphs) and document.paragraphs[index].text.strip()
+    )
+    if signature_content:
+        first_signature = signature_content[0]
+        spacer_index = first_signature - 1
+        if spacer_index < 0 or document.paragraphs[spacer_index].text.strip():
+            errors.append(f"Paragraph {first_signature} (signature) is not preceded by a blank line")
+        elif expected_roles.get(spacer_index) != "signature":
+            errors.append(f"Paragraph {first_signature} (signature) blank line is not signature-formatted")
+
     for index, paragraph in enumerate(document.paragraphs):
         if index in table_title_indexes:
             continue
@@ -200,6 +243,10 @@ def validate_document(
         if role == "colophon":
             validate_font_only(paragraph, f"Paragraph {index} (colophon)", profile["styles"]["body"], errors)
             warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
+        elif role == "signature":
+            if classifications is not None and paragraph.style.name != ROLE_STYLES[role]:
+                errors.append(f"Paragraph {index} ({role}) is missing its managed style")
+            validate_signature_paragraph(paragraph, index, profile, errors)
         elif role in profile["styles"]:
             if classifications is not None and paragraph.style.name != ROLE_STYLES[role]:
                 errors.append(f"Paragraph {index} ({role}) is missing its managed style")
