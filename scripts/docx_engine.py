@@ -16,8 +16,6 @@ from docx.shared import Cm, Mm, Pt, RGBColor
 from docx.text.paragraph import Paragraph
 
 from common import (
-    SIGNATURE_LEFT_CHARS,
-    SIGNATURE_LEFT_TWIPS,
     active_profile,
     choose_output_path,
     configure_utf8_stdio,
@@ -25,7 +23,10 @@ from common import (
     signature_style_spec,
     unique_output_path,
 )
-from inspect_docx import analyze_tables, classify_paragraphs, inspect_document
+from inspect_docx import (
+    analyze_tables, classify_paragraphs, inspect_document, is_spacing_paragraph,
+    normalize_legacy_roles, signature_left_indents, split_signature_text, title_block_layout,
+)
 from privacy_scrub import scrub_docx
 from validate_docx import validate_document
 
@@ -139,6 +140,7 @@ def set_paragraph_geometry(paragraph, spec: dict) -> None:
     fmt = paragraph.paragraph_format
     fmt.space_before = Pt(spec["space_before_pt"])
     fmt.space_after = Pt(0)
+    fmt.widow_control = False
     p_pr = paragraph._p.get_or_add_pPr()
     spacing = p_pr.get_or_add_spacing()
     spacing.set(qn("w:line"), str(round(spec["line_spacing_pt"] * 20)))
@@ -153,14 +155,16 @@ def set_paragraph_geometry(paragraph, spec: dict) -> None:
     ind.set(qn("w:firstLineChars"), str(round(spec["first_line_chars"] * 100)))
 
 
-def set_signature_geometry(paragraph, spec: dict) -> None:
+def set_signature_geometry(paragraph, spec: dict, left_twips: int) -> None:
     set_paragraph_geometry(paragraph, spec)
     p_pr = paragraph._p.get_or_add_pPr()
     ind = p_pr.get_or_add_ind()
-    ind.set(qn("w:left"), str(SIGNATURE_LEFT_TWIPS))
-    ind.set(qn("w:leftChars"), str(SIGNATURE_LEFT_CHARS))
+    ind.set(qn("w:left"), str(left_twips))
+    ind.attrib.pop(qn("w:leftChars"), None)
     ind.set(qn("w:firstLine"), "0")
     ind.set(qn("w:firstLineChars"), "0")
+    for attr in ("right", "rightChars", "hanging", "hangingChars"):
+        ind.attrib.pop(qn(f"w:{attr}"), None)
 
 
 def ensure_styles(document: Document, profile: dict, fonts: dict[str, str]) -> None:
@@ -179,14 +183,11 @@ def ensure_styles(document: Document, profile: dict, fonts: dict[str, str]) -> N
         style.paragraph_format.alignment = ALIGNMENTS[spec["alignment"]]
         style.paragraph_format.space_before = Pt(spec["space_before_pt"])
         style.paragraph_format.space_after = Pt(0)
+        style.paragraph_format.widow_control = False
 
 
-def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str]) -> None:
+def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str], signature_left: int = 0) -> None:
     if role == "skip":
-        set_paragraph_black(paragraph)
-        return
-    if role == "colophon":
-        apply_font_only(paragraph, profile["styles"]["body"], fonts["body"])
         return
     if role not in ROLE_NAMES:
         raise ValueError(f"Unsupported paragraph role: {role}")
@@ -194,7 +195,7 @@ def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str]) -> No
     font_role = "body" if role == "signature" else role
     paragraph.style = ROLE_NAMES[role]
     if role == "signature":
-        set_signature_geometry(paragraph, spec)
+        set_signature_geometry(paragraph, spec, signature_left)
     else:
         set_paragraph_geometry(paragraph, spec)
     for run in paragraph.runs:
@@ -206,6 +207,7 @@ def apply_role(paragraph, role: str, profile: dict, fonts: dict[str, str]) -> No
 
 
 def apply_font_only(paragraph, spec: dict, font_name: str, bold: bool | None = None) -> None:
+    paragraph.paragraph_format.widow_control = False
     for run in paragraph.runs:
         run.font.name = spec["font_latin"]
         if bold is not None:
@@ -263,6 +265,7 @@ def clear_paragraph(paragraph) -> None:
 
 def add_page_field(paragraph, spec: dict, font_name: str) -> None:
     clear_paragraph(paragraph)
+    paragraph.paragraph_format.widow_control = False
     paragraph.paragraph_format.first_line_indent = None
     paragraph.paragraph_format.space_before = Pt(0)
     paragraph.paragraph_format.space_after = Pt(0)
@@ -385,6 +388,7 @@ def load_format_map(path: str | None, document: Document) -> tuple[list[dict], l
         raise ValueError("Classification file tables must be an array")
     else:
         table_specs = validate_table_specs(table_items, document)
+    normalize_legacy_roles(document, items)
     return items, table_specs
 
 
@@ -412,13 +416,6 @@ def _add_blank_classification(classifications: list[dict], index: int, role: str
     classifications.sort(key=lambda entry: entry["index"])
 
 
-def _insert_blank_after(document: Document, index: int) -> None:
-    paragraph = document.paragraphs[index]
-    element = OxmlElement("w:p")
-    paragraph._p.addnext(element)
-    Paragraph(element, paragraph._parent)
-
-
 def _insert_blank_before(document: Document, index: int) -> None:
     paragraph = document.paragraphs[index]
     element = OxmlElement("w:p")
@@ -426,26 +423,112 @@ def _insert_blank_before(document: Document, index: int) -> None:
     Paragraph(element, paragraph._parent)
 
 
-def ensure_required_spacing(document: Document, classifications: list[dict], table_specs: list[dict]) -> None:
-    title_item = next((item for item in classifications if item["role"] == "main_title"), None)
-    if title_item is not None:
-        title_index = title_item["index"]
-        title_paragraph = document.paragraphs[title_index]
-        following = title_paragraph._p.getnext()
-        if following is not None and following.tag == qn("w:p") and not Paragraph(following, title_paragraph._parent).text.strip():
-            _add_blank_classification(classifications, title_index + 1, "body")
-        else:
-            insertion_index = title_index + 1
-            _shift_paragraph_indexes(classifications, table_specs, insertion_index)
-            _insert_blank_after(document, title_index)
-            _add_blank_classification(classifications, insertion_index, "body")
+def normalize_signature_lines(document: Document, classifications: list[dict], table_specs: list[dict]) -> None:
+    normalize_legacy_roles(document, classifications)
+    for item in list(classifications):
+        if item["role"] != "signature":
+            continue
+        paragraph = document.paragraphs[item["index"]]
+        parts = split_signature_text(paragraph.text)
+        if parts is None:
+            continue
+        # Do not flatten fields, links, drawings, bookmarks or section boundaries.
+        p_pr = paragraph._p.pPr
+        if p_pr is not None and p_pr.find(qn("w:sectPr")) is not None:
+            raise ValueError("Signature with a section break cannot be split automatically")
+        for child in paragraph._p:
+            if child.tag == qn("w:pPr"):
+                continue
+            if child.tag != qn("w:r") or any(
+                node.tag not in {qn("w:rPr"), qn("w:t"), qn("w:tab"), qn("w:br")} for node in child
+            ):
+                raise ValueError("Signature contains complex content; provide separate plain office/date paragraphs")
+            if any(node.tag == qn("w:br") and node.get(qn("w:type")) in {"page", "column"} for node in child):
+                raise ValueError("Signature contains a page or column break; split it manually")
+        office, date = parts
+        paragraph.text = office
+        item["text_preview"] = office[:80]
+        insertion_index = item["index"] + 1
+        _shift_paragraph_indexes(classifications, table_specs, insertion_index)
+        element = OxmlElement("w:p")
+        paragraph._p.addnext(element)
+        Paragraph(element, paragraph._parent).text = date
+        classifications.append({"index": insertion_index, "role": "signature", "text_preview": date[:80]})
+    classifications.sort(key=lambda entry: entry["index"])
 
-    signature_items = [item for item in classifications if item["role"] == "signature"]
+
+def _remove_spacing(document: Document, classifications: list[dict], table_specs: list[dict], index: int) -> None:
+    paragraph = document.paragraphs[index]
+    if not is_spacing_paragraph(paragraph):
+        raise ValueError("Cannot remove a non-spacing paragraph")
+    if any(item.get("title_paragraph_index") == index for item in table_specs):
+        raise ValueError("A table title cannot be removed as spacing")
+    paragraph._p.getparent().remove(paragraph._p)
+    classifications[:] = [item for item in classifications if item["index"] != index]
+    for item in classifications:
+        if item["index"] > index:
+            item["index"] -= 1
+    for item in table_specs:
+        if item.get("title_paragraph_index") is not None and item["title_paragraph_index"] > index:
+            item["title_paragraph_index"] -= 1
+
+
+def ensure_required_spacing(document: Document, classifications: list[dict], table_specs: list[dict]) -> None:
+    for title_item in [item for item in classifications if item["role"] == "main_title"]:
+        paragraphs = document.paragraphs
+        roles = {item["index"]: item["role"] for item in classifications}
+        end_index, blanks = title_block_layout(document, roles, title_item["index"])
+        end_element = paragraphs[end_index]._p
+        # Keep element identities so moving legacy spacing also remaps table titles
+        # and confirmed classifications, without reclassifying the user's content.
+        entries = [(item, paragraphs[item["index"]]._p) for item in classifications]
+        table_titles = [
+            (item, paragraphs[item["title_paragraph_index"]]._p)
+            for item in table_specs if item.get("title_paragraph_index") is not None
+        ]
+        if blanks:
+            keep_index = next((index for index in blanks if index > end_index), blanks[0])
+            spacer = paragraphs[keep_index]._p
+            for index in blanks:
+                if index != keep_index:
+                    element = paragraphs[index]._p
+                    element.getparent().remove(element)
+            if end_element.getnext() is not spacer:
+                end_element.addnext(spacer)
+        else:
+            spacer = OxmlElement("w:p")
+            end_element.addnext(spacer)
+        indexes = {paragraph._p: index for index, paragraph in enumerate(document.paragraphs)}
+        classifications[:] = [item for item, element in entries if element in indexes]
+        for item, element in entries:
+            if element in indexes:
+                item["index"] = indexes[element]
+        for item, element in table_titles:
+            item["title_paragraph_index"] = indexes[element]
+        _add_blank_classification(classifications, indexes[spacer], "body")
+
+    signature_items = [
+        item for item in classifications
+        if item["role"] == "signature" and document.paragraphs[item["index"]].text.strip()
+    ]
     if signature_items:
         first_index = min(item["index"] for item in signature_items)
+        # Collapse only plain spacing immediately above the signature, keeping
+        # one paragraph; never remove an image or a page/section break.
+        while first_index >= 2:
+            previous = document.paragraphs[first_index - 1]
+            earlier = document.paragraphs[first_index - 2]
+            if (
+                earlier._p.getnext() is not previous._p
+                or previous._p.getnext() is not document.paragraphs[first_index]._p
+                or not is_spacing_paragraph(previous) or not is_spacing_paragraph(earlier)
+            ):
+                break
+            _remove_spacing(document, classifications, table_specs, first_index - 2)
+            first_index -= 1
         first_paragraph = document.paragraphs[first_index]
         preceding = first_paragraph._p.getprevious()
-        if preceding is not None and preceding.tag == qn("w:p") and not Paragraph(preceding, first_paragraph._parent).text.strip():
+        if preceding is not None and preceding.tag == qn("w:p") and is_spacing_paragraph(Paragraph(preceding, first_paragraph._parent)):
             _add_blank_classification(classifications, first_index - 1, "signature")
         else:
             _shift_paragraph_indexes(classifications, table_specs, first_index)
@@ -455,17 +538,18 @@ def ensure_required_spacing(document: Document, classifications: list[dict], tab
 
 def apply_document_format(document: Document, classifications: list[dict], table_specs: list[dict], profile: dict) -> list[str]:
     fonts, page_font, warnings = resolve_fonts(profile)
+    apply_page_setup(document, profile, warnings)
     ensure_styles(document, profile, fonts)
+    signature_indents = signature_left_indents(document, profile, {item["index"]: item["role"] for item in classifications})
+    if any(indent == 0 for indent in signature_indents.values()):
+        warnings.append("Long signature uses the full text width and may wrap; review the rendered layout")
     table_title_indexes = {
         item["title_paragraph_index"] for item in table_specs if item.get("title_paragraph_index") is not None
     }
     for item in classifications:
         role = "skip" if item["index"] in table_title_indexes else item["role"]
-        apply_role(document.paragraphs[item["index"]], role, profile, fonts)
-    if any(item["role"] == "colophon" for item in classifications):
-        warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
+        apply_role(document.paragraphs[item["index"]], role, profile, fonts, signature_indents.get(item["index"], 0))
     apply_table_format(document, table_specs, profile, fonts)
-    apply_page_setup(document, profile, warnings)
     set_footer(document, profile, page_font)
     return warnings
 
@@ -511,11 +595,13 @@ def add_text(document: Document, text: str) -> list[dict]:
     for item in classifications:
         if item["index"] in explicit:
             item["role"] = explicit[item["index"]]
+    normalize_legacy_roles(document, classifications)
     return classifications
 
 
 def finalize(document: Document, output: Path, profile: dict, classifications: list[dict], table_specs: list[dict]) -> dict:
     output.parent.mkdir(parents=True, exist_ok=True)
+    normalize_signature_lines(document, classifications, table_specs)
     ensure_required_spacing(document, classifications, table_specs)
     warnings = apply_document_format(document, classifications, table_specs, profile)
     document.save(output)

@@ -13,14 +13,16 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
-from common import configure_utf8_stdio
+from common import configure_utf8_stdio, signature_indent_twips
 
 
 H1_RE = re.compile(r"^[一二三四五六七八九十百]+、")
 H2_RE = re.compile(r"^（[一二三四五六七八九十百]+）")
-DATE_RE = re.compile(r"^(?:\d{4}年\d{1,2}月\d{1,2}日|某年某月某日)$")
+DATE_PATTERN = r"(?:\d{4}年\d{1,2}月\d{1,2}日|某年某月某日)"
+DATE_RE = re.compile(rf"^{DATE_PATTERN}$")
+SIGNATURE_DATE_RE = re.compile(rf"^{DATE_PATTERN}(?:\s*印发)?[。．.]?$")
+INLINE_SIGNATURE_RE = re.compile(rf"^(.+?)\s*({DATE_PATTERN}(?:\s*印发)?[。．.]?)$", re.DOTALL)
 NOTE_RE = re.compile(r"^(?:（.*）|\(.*\))$", re.DOTALL)
-COLOPHON_RE = re.compile(r"(?:\d{4}年\d{1,2}月\d{1,2}日|某年某月某日)\s*印发[。．.]?$")
 SIGNATURE_OFFICE_RE = re.compile(r"(?:单位|办公室|委员会|人民政府|政府|局|厅|部|院|中心|公司|集团|学校|协会|研究院)$")
 ALLOWED_EXTENSIONS = {".docx"}
 TABLE_TITLE_SUFFIXES = ("统计表", "一览表", "明细表", "安排表", "情况表", "汇总表", "清单")
@@ -32,8 +34,86 @@ STYLE_ROLES = {
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
     "ODF Signature": "signature",
-    "ODF Colophon": "colophon",
+    "ODF Colophon": "skip",  # Legacy style: no longer a formatting role.
 }
+
+
+def split_signature_text(text: str) -> tuple[str, str] | None:
+    """Recognize an office/date line without discarding the date's suffix."""
+    match = INLINE_SIGNATURE_RE.fullmatch(text.strip())
+    if not match:
+        return None
+    office, date = (part.strip() for part in match.groups())
+    if len(office) > 40 or not SIGNATURE_OFFICE_RE.search(office) or re.search(r"[：:。；;，,\r\n]", office):
+        return None
+    return office, date
+
+
+def normalize_legacy_roles(document: Document, classifications: list[dict]) -> None:
+    """Accept old maps without retaining the retired colophon formatter."""
+    inferred = {item["index"]: item["role"] for item in classify_paragraphs(document)}
+    for item in classifications:
+        if item["role"] == "colophon":
+            item["role"] = "signature" if inferred.get(item["index"]) == "signature" else "skip"
+
+
+def signature_left_indents(document: Document, profile: dict, roles: dict[int, str]) -> dict[int, int]:
+    """Use the actual section's text width; all signature lines share an axis."""
+    lines = [p.text for index, p in enumerate(document.paragraphs) if roles.get(index) == "signature" and p.text.strip()]
+    indents: dict[int, int] = {}
+    section_index = 0
+    sections = list(document.sections)
+    for index, paragraph in enumerate(document.paragraphs):
+        if roles.get(index) == "signature":
+            section = sections[min(section_index, len(sections) - 1)]
+            width = section.page_width.twips - section.left_margin.twips - section.right_margin.twips
+            if section.gutter is not None:
+                width -= section.gutter.twips
+            indents[index] = signature_indent_twips(lines, profile["styles"]["body"]["size_pt"], width)
+        if paragraph._p.pPr is not None and paragraph._p.pPr.find(qn("w:sectPr")) is not None:
+            section_index += 1
+    return indents
+
+
+def is_spacing_paragraph(paragraph: Paragraph) -> bool:
+    """Only plain empty paragraphs may be moved or removed as spacing."""
+    if paragraph.text.strip():
+        return False
+    p_pr = paragraph._p.pPr
+    if p_pr is not None and any(p_pr.find(qn(tag)) is not None for tag in ("w:sectPr", "w:pageBreakBefore")):
+        return False
+    for child in paragraph._p:
+        if child.tag == qn("w:pPr"):
+            continue
+        if child.tag != qn("w:r"):
+            return False
+        if any(node.tag not in {qn("w:rPr"), qn("w:t")} for node in child):
+            return False
+    return True
+
+
+def title_block_layout(document: Document, roles: dict[int, str], title_index: int) -> tuple[int, list[int]]:
+    """Find the title/description block and its plain spacing paragraphs.
+
+    Stop at the first other content block, including tables and drawings.
+    Legacy blanks between the title and descriptions are included for repair.
+    """
+    paragraphs = document.paragraphs
+    end_index = title_index
+    blanks: list[int] = []
+    previous = paragraphs[title_index]._p
+    for index in range(title_index + 1, len(paragraphs)):
+        paragraph = paragraphs[index]
+        if previous.getnext() is not paragraph._p:
+            break
+        if is_spacing_paragraph(paragraph) and roles.get(index) in {None, "skip", "body", "description"}:
+            blanks.append(index)
+        elif paragraph.text.strip() and roles.get(index) == "description":
+            end_index = index
+        else:
+            break
+        previous = paragraph._p
+    return end_index, blanks
 
 
 def package_risks(path: Path) -> tuple[list[str], list[str]]:
@@ -62,7 +142,6 @@ def package_risks(path: Path) -> tuple[list[str], list[str]]:
 def classify_paragraphs(document: Document) -> list[dict]:
     entries: list[dict] = []
     nonempty = [index for index, paragraph in enumerate(document.paragraphs) if paragraph.text.strip()]
-    tail_indices = set(nonempty[-5:])
     title_index = nonempty[0] if nonempty else None
     description_indices: set[int] = set()
     signature_indices: set[int] = set()
@@ -75,12 +154,24 @@ def classify_paragraphs(document: Document) -> list[dict]:
                 if len(document.paragraphs[after[0]].text.strip()) <= 40:
                     description_indices.add(after[0])
                 description_indices.add(after[1])
+            else:
+                office_text = document.paragraphs[after[0]].text.strip()
+                if (
+                    len(office_text) <= 40
+                    and SIGNATURE_OFFICE_RE.search(office_text)
+                    and not H1_RE.match(office_text)
+                    and not H2_RE.match(office_text)
+                    and not NOTE_RE.fullmatch(office_text)
+                ):
+                    description_indices.add(after[0])
+    if nonempty and nonempty[-1] != title_index and split_signature_text(document.paragraphs[nonempty[-1]].text):
+        signature_indices.add(nonempty[-1])
     if len(nonempty) >= 2:
         date_index = nonempty[-1]
         office_index = nonempty[-2]
         office_text = document.paragraphs[office_index].text.strip()
         if (
-            DATE_RE.fullmatch(document.paragraphs[date_index].text.strip())
+            SIGNATURE_DATE_RE.fullmatch(document.paragraphs[date_index].text.strip())
             and office_index != title_index
             and len(office_text) <= 40
             and SIGNATURE_OFFICE_RE.search(office_text)
@@ -92,7 +183,7 @@ def classify_paragraphs(document: Document) -> list[dict]:
     for index, paragraph in enumerate(document.paragraphs):
         text = paragraph.text.strip()
         styled_role = STYLE_ROLES.get(paragraph.style.name)
-        if index in signature_indices and styled_role in {None, "body", "signature"}:
+        if index in signature_indices and styled_role in {None, "body", "signature", "skip"}:
             role = "signature"
         elif styled_role:
             role = styled_role
@@ -108,8 +199,6 @@ def classify_paragraphs(document: Document) -> list[dict]:
             role = "heading2"
         elif NOTE_RE.fullmatch(text):
             role = "reference_note"
-        elif index in tail_indices and COLOPHON_RE.search(text):
-            role = "colophon"
         else:
             role = "body"
         entries.append({"index": index, "role": role, "text_preview": text[:80]})
@@ -192,11 +281,8 @@ def inspect_document(path: Path) -> dict:
         textbox_count = xml.count(b"<w:txbxContent")
     landscape_sections = sum(1 for section in document.sections if section.orientation == WD_ORIENT.LANDSCAPE)
     classifications = classify_paragraphs(document)
-    colophon_count = sum(1 for item in classifications if item["role"] == "colophon")
     if landscape_sections:
         warnings.append("Landscape sections will be preserved and will not receive portrait page settings")
-    if colophon_count:
-        warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
     if document.tables:
         warnings.append("Table fonts, text color, and the global bold setting will be normalized; borders, shading, alignment, sizes, spacing, row heights, and column widths will be preserved")
     if drawing_count or textbox_count:
@@ -217,7 +303,6 @@ def inspect_document(path: Path) -> dict:
             "drawings": drawing_count,
             "textboxes": textbox_count,
             "landscape_sections": landscape_sections,
-            "colophon_paragraphs": colophon_count,
             "classification_counts": counts,
         },
         "classifications": classifications,

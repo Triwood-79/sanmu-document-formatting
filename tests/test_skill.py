@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 import os
 import subprocess
@@ -8,11 +9,13 @@ import sys
 import tempfile
 import unittest
 import zipfile
+from copy import deepcopy
 from pathlib import Path
 
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 from docx.shared import Pt, RGBColor
 
 
@@ -20,8 +23,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from common import active_profile, load_preset  # noqa: E402
-from inspect_docx import inspect_document  # noqa: E402
+from common import active_profile, load_preset, signature_indent_twips  # noqa: E402
+from inspect_docx import analyze_tables, classify_paragraphs, inspect_document  # noqa: E402
+from docx_engine import add_text, ensure_required_spacing, finalize  # noqa: E402
 from privacy_scrub import scrub_docx  # noqa: E402
 from validate_docx import validate_document  # noqa: E402
 
@@ -156,8 +160,8 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(document.paragraphs[-1].text, "2026年8月31日")
         for paragraph in document.paragraphs[-3:]:
             ind = paragraph._p.pPr.ind
-            self.assertEqual(ind.get(qn("w:left")), "6160")
-            self.assertEqual(ind.get(qn("w:leftChars")), "2800")
+            self.assertGreater(int(ind.get(qn("w:left"))), 0)
+            self.assertIsNone(ind.get(qn("w:leftChars")))
             self.assertEqual(ind.get(qn("w:firstLine")), "0")
             self.assertEqual(ind.get(qn("w:firstLineChars")), "0")
             self.assertEqual(paragraph.alignment, WD_ALIGN_PARAGRAPH.CENTER)
@@ -238,7 +242,206 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(Document(existing).paragraphs[0].text, "SENTINEL")
         self.assertTrue(actual.exists())
 
-    def test_new_colophon_content_gets_font_only_normalization(self) -> None:
+    def test_create_explicitly_disables_widow_control_on_all_managed_roles(self) -> None:
+        document = Document()
+        classifications = add_text(document, "示例标题\n[说明]某署名\n一、示例标题\n（一）示例子标题\n正文。\n（示例备注）\n某单位办公室\n某年某月某日")
+        output = self.root / "no-widow.docx"
+        finalize(document, output, load_preset(), classifications, [])
+        formatted = Document(output)
+        for paragraph in formatted.paragraphs:
+            self.assertIs(paragraph.paragraph_format.widow_control, False)
+        for style in formatted.styles:
+            if style.name.startswith("ODF "):
+                self.assertIs(style.paragraph_format.widow_control, False)
+        for section in formatted.sections:
+            self.assertIs(section.footer.paragraphs[0].paragraph_format.widow_control, False)
+            self.assertIs(section.even_page_footer.paragraphs[0].paragraph_format.widow_control, False)
+
+    def test_existing_widow_control_is_disabled_without_changing_other_pagination(self) -> None:
+        document = Document()
+        document.styles["Normal"].paragraph_format.widow_control = True
+        document.add_paragraph("示例标题")
+        body = document.add_paragraph("正文。")
+        body.paragraph_format.widow_control = True
+        body.paragraph_format.keep_with_next = True
+        body.paragraph_format.keep_together = True
+        body.paragraph_format.page_break_before = True
+        title = document.add_paragraph("示例统计表")
+        table = document.add_table(rows=2, cols=1)
+        for row in table.rows:
+            paragraph = row.cells[0].paragraphs[0]
+            paragraph.add_run("示例")
+            paragraph.paragraph_format.widow_control = True
+            paragraph.paragraph_format.keep_together = True
+        preserved = document.add_paragraph("保留段落。")
+        preserved.paragraph_format.widow_control = True
+        preserved_xml = preserved._p.xml
+        classifications = classify_paragraphs(document)
+        classifications[-1]["role"] = "skip"
+        output = self.root / "existing-no-widow.docx"
+        finalize(document, output, load_preset(), classifications, analyze_tables(document))
+        self.assertIs(body.paragraph_format.widow_control, False)
+        self.assertIs(title.paragraph_format.widow_control, False)
+        self.assertIs(body.paragraph_format.keep_with_next, True)
+        self.assertIs(body.paragraph_format.keep_together, True)
+        self.assertIs(body.paragraph_format.page_break_before, True)
+        for row in table.rows:
+            paragraph = row.cells[0].paragraphs[0]
+            self.assertIs(paragraph.paragraph_format.widow_control, False)
+            self.assertIs(paragraph.paragraph_format.keep_together, True)
+        self.assertEqual(preserved._p.xml, preserved_xml)
+
+    def test_validator_rejects_enabled_or_unspecified_widow_control(self) -> None:
+        document = Document()
+        document.add_paragraph("示例标题")
+        document.add_paragraph("正文。")
+        document.add_table(rows=1, cols=1).cell(0, 0).text = "表格示例"
+        valid = self.root / "widow-valid.docx"
+        finalize(document, valid, load_preset(), classify_paragraphs(document), analyze_tables(document))
+        for target in ("body", "table", "footer"):
+            for value in (True, None):
+                with self.subTest(target=target, value=value):
+                    changed = Document(valid)
+                    if target == "body":
+                        paragraph = next(p for p in changed.paragraphs if p.text == "正文。")
+                    elif target == "table":
+                        paragraph = changed.tables[0].cell(0, 0).paragraphs[0]
+                    else:
+                        paragraph = changed.sections[0].footer.paragraphs[0]
+                    paragraph.paragraph_format.widow_control = value
+                    invalid = self.root / "widow-invalid.docx"
+                    changed.save(invalid)
+                    scrub_docx(invalid)
+                    report = validate_document(invalid, load_preset())
+                    self.assertFalse(report["valid"])
+                    self.assertTrue(any("widow/orphan control" in error for error in report["errors"]))
+
+    def test_header_spacing_optional_description_and_addressee_matrix(self) -> None:
+        for descriptions in ([], ["某示例单位"], ["某年某月某日"], ["某示例单位", "某年某月某日"]):
+            for addressee in ([], ["各相关处室："]):
+                lines = ["示例标题", *descriptions, *addressee, "为做好示例工作，现通知如下。"]
+                expected = ["示例标题", *descriptions, "", *addressee, lines[-1]]
+                for mode in ("create", "existing"):
+                    with self.subTest(descriptions=descriptions, addressee=addressee, mode=mode):
+                        document = Document()
+                        if mode == "create":
+                            classifications = add_text(document, "\n".join(lines))
+                        else:
+                            for line in lines:
+                                document.add_paragraph(line)
+                            classifications = classify_paragraphs(document)
+                        output = self.root / "header-matrix.docx"
+                        finalize(document, output, load_preset(), classifications, [])
+                        formatted = Document(output)
+                        self.assertEqual([p.text for p in formatted.paragraphs], expected)
+                        spacer = formatted.paragraphs[1 + len(descriptions)]
+                        self.assertEqual(spacer.style.name, "ODF Body")
+                        self.assertEqual(spacer._p.pPr.spacing.get(qn("w:line")), "600")
+                        self.assertEqual(spacer._p.pPr.spacing.get(qn("w:lineRule")), "exact")
+                        report = validate_document(output, load_preset())
+                        self.assertTrue(report["valid"], report["errors"])
+
+    def test_header_spacing_repair_preserves_maps_tables_and_is_idempotent(self) -> None:
+        for blanks in ((1, 0, 0), (1, 1, 1), (0, 0, 2)):
+            with self.subTest(blanks=blanks):
+                document = Document()
+                for line, count in zip(["示例标题", "某示例单位", "某年某月某日"], blanks):
+                    document.add_paragraph(line)
+                    for _ in range(count):
+                        document.add_paragraph("")
+                for line in ["各相关处室：", "这是正文。", "示例数据统计表"]:
+                    document.add_paragraph(line)
+                document.add_table(rows=2, cols=2)
+                document.add_paragraph("某示例单位办公室")
+                document.add_paragraph("某年某月某日")
+                source = self.root / "legacy-source.docx"
+                document.save(source)
+                source_bytes = source.read_bytes()
+                classifications = classify_paragraphs(document)
+                tables = analyze_tables(document)
+                self.assertIsNotNone(tables[0]["title_paragraph_index"])
+                output = self.root / "legacy-repaired.docx"
+                finalize(document, output, load_preset(), classifications, tables)
+                expected = [
+                    "示例标题", "某示例单位", "某年某月某日", "", "各相关处室：", "这是正文。",
+                    "示例数据统计表", "", "某示例单位办公室", "某年某月某日",
+                ]
+                self.assertEqual([p.text for p in document.paragraphs], expected)
+                self.assertEqual(tables[0]["title_paragraph_index"], 6)
+                for item in classifications:
+                    self.assertEqual(document.paragraphs[item["index"]].text[:80], item["text_preview"])
+                self.assertEqual(source.read_bytes(), source_bytes)
+                for _ in range(2):
+                    document = Document(output)
+                    classifications = classify_paragraphs(document)
+                    tables = analyze_tables(document)
+                    finalize(document, output, load_preset(), classifications, tables)
+                    self.assertEqual([p.text for p in Document(output).paragraphs], expected)
+                report = validate_document(output, load_preset())
+                self.assertTrue(report["valid"], report["errors"])
+
+    def test_validator_rejects_legacy_misplaced_and_duplicate_header_blanks(self) -> None:
+        document = Document()
+        classifications = add_text(document, "示例标题\n某示例单位\n某年某月某日\n各相关处室：\n正文。")
+        valid = self.root / "header-valid.docx"
+        finalize(document, valid, load_preset(), classifications, [])
+        for variant in ("legacy", "both", "duplicate"):
+            with self.subTest(variant=variant):
+                document = Document(valid)
+                spacer = document.paragraphs[3]._p
+                if variant == "legacy":
+                    document.paragraphs[0]._p.addnext(spacer)
+                else:
+                    anchor = document.paragraphs[0]._p if variant == "both" else spacer
+                    anchor.addnext(deepcopy(spacer))
+                output = self.root / "header-invalid.docx"
+                document.save(output)
+                scrub_docx(output)
+                report = validate_document(output, load_preset())
+                self.assertFalse(report["valid"])
+                self.assertTrue(any("misplaced or duplicate" in error for error in report["errors"]))
+                if variant == "legacy":
+                    self.assertTrue(any("not followed by a blank line" in error for error in report["errors"]))
+
+    def test_header_spacing_preserves_nontext_content_and_stops_at_tables(self) -> None:
+        for kind in ("drawing", "break", "bookmark", "section", "table"):
+            with self.subTest(kind=kind):
+                document = Document()
+                title = document.add_paragraph("示例标题")
+                if kind == "table":
+                    block = document.add_table(rows=1, cols=1)._tbl
+                else:
+                    paragraph = document.add_paragraph()
+                    block = paragraph._p
+                    if kind == "drawing":
+                        paragraph.add_run().add_picture(io.BytesIO(PNG_1X1))
+                    elif kind == "break":
+                        paragraph.add_run().add_break()
+                    elif kind == "bookmark":
+                        mark = OxmlElement("w:bookmarkStart")
+                        mark.set(qn("w:id"), "0")
+                        mark.set(qn("w:name"), "example")
+                        block.append(mark)
+                    else:
+                        block.get_or_add_pPr().append(OxmlElement("w:sectPr"))
+                document.add_paragraph("某示例单位")
+                document.add_paragraph("正文。")
+                before = block.xml
+                classifications = classify_paragraphs(document)
+                ensure_required_spacing(document, classifications, analyze_tables(document))
+                self.assertEqual(block.xml, before)
+                self.assertIs(title._p.getnext().getnext(), block)
+                self.assertEqual(document.paragraphs[1].style.name, "Normal")
+                self.assertEqual(next(item for item in classifications if item["index"] == 1)["role"], "body")
+
+    def test_explicit_description_without_date_is_kept_above_header_blank(self) -> None:
+        document = Document()
+        classifications = add_text(document, "# 示例标题\n[说明]某署名\n正文。")
+        output = self.root / "explicit-description.docx"
+        finalize(document, output, load_preset(), classifications, [])
+        self.assertEqual([p.text for p in Document(output).paragraphs], ["示例标题", "某署名", "", "正文。"])
+
+    def test_legacy_marker_migrates_terminal_office_date_to_signature(self) -> None:
         output = self.root / "colophon-unsupported.docx"
         result = json.loads(
             self.run_script(
@@ -250,10 +453,10 @@ class SkillTests(unittest.TestCase):
                 output,
             ).stdout
         )
-        self.assertTrue(any("Colophon structure was preserved" in warning for warning in result["warnings"]))
+        self.assertFalse(any("Colophon" in warning for warning in result["warnings"]))
         document = Document(output)
-        self.assertEqual(document.paragraphs[-1].text, "某单位办公室 某年某月某日印发")
-        self.assertEqual(document.paragraphs[-1].style.name, "Normal")
+        self.assertEqual([p.text for p in document.paragraphs[-3:]], ["", "某单位办公室", "某年某月某日印发"])
+        self.assertEqual(document.paragraphs[-1].style.name, "ODF Signature")
         self.assertIn(
             run_east_asia_font(document.paragraphs[-1].runs[0]),
             {"方正仿宋_GBK", "仿宋_GB2312", "仿宋GB2312", "FangSong_GB2312", "FangSong"},
@@ -261,9 +464,9 @@ class SkillTests(unittest.TestCase):
         self.assertEqual(run_color(document.paragraphs[-1].runs[0]), "000000")
         report = validate_document(output, load_preset())
         self.assertTrue(report["valid"], report["errors"])
-        self.assertTrue(any("Colophon structure was preserved" in warning for warning in report["warnings"]))
+        self.assertFalse(any("Colophon" in warning for warning in report["warnings"]))
 
-    def test_existing_colophon_preserves_geometry_and_size(self) -> None:
+    def test_existing_combined_office_date_is_split_and_formatted_as_signature(self) -> None:
         source = self.root / "existing-colophon.docx"
         document = Document()
         document.add_paragraph("示例标题")
@@ -277,7 +480,7 @@ class SkillTests(unittest.TestCase):
         document.save(source)
 
         inspection = inspect_document(source)
-        self.assertEqual(inspection["classifications"][-1]["role"], "colophon")
+        self.assertEqual(inspection["classifications"][-1]["role"], "signature")
         mapping = self.root / "existing-colophon-map.json"
         mapping.write_text(
             json.dumps({"classifications": inspection["classifications"], "tables": []}, ensure_ascii=False),
@@ -299,13 +502,130 @@ class SkillTests(unittest.TestCase):
         formatted = Document(output)
         paragraph = formatted.paragraphs[-1]
         formatted_run = paragraph.runs[0]
-        self.assertEqual(paragraph.alignment, WD_ALIGN_PARAGRAPH.RIGHT)
-        self.assertEqual(formatted_run.font.size.pt, 12)
+        self.assertEqual([p.text for p in formatted.paragraphs[-3:]], ["", "某测试单位办公室", "2026年8月28日印发"])
+        self.assertEqual(paragraph.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        self.assertEqual(formatted_run.font.size.pt, 16)
         self.assertIn(
             run_east_asia_font(formatted_run),
             {"方正仿宋_GBK", "仿宋_GB2312", "仿宋GB2312", "FangSong_GB2312", "FangSong"},
         )
         self.assertEqual(run_color(formatted_run), "000000")
+
+    def test_signature_indent_changes_with_text_size_and_page_width(self) -> None:
+        lefts = []
+        for office, size, margin in [("某单位", 16, 2.8), ("某示例联合协调工作委员会办公室", 16, 2.8),
+                                     ("某示例联合协调工作委员会办公室", 20, 2.8), ("某单位", 16, 4.0)]:
+            document = Document()
+            profile = load_preset()
+            profile["styles"]["body"]["size_pt"] = size
+            profile["page"]["margins_cm"]["left"] = margin
+            classifications = add_text(document, f"示例标题\n正文。\n[落款]{office}\n[落款]2026年8月28日印发")
+            output = self.root / "dynamic-signature.docx"
+            finalize(document, output, profile, classifications, [])
+            formatted = Document(output)
+            indents = [int(p._p.pPr.ind.get(qn("w:left"))) for p in formatted.paragraphs[-3:]]
+            self.assertEqual(len(set(indents)), 1)
+            lefts.append(indents[0])
+            section = formatted.sections[0]
+            available = section.page_width.twips - section.left_margin.twips - section.right_margin.twips
+            # Reserve at least the full-width character budget for either line.
+            required = max(len(office), len("2026年8月28日印发")) * size * 20
+            self.assertGreaterEqual(available - indents[0], min(available, required))
+            self.assertTrue(validate_document(output, profile)["valid"])
+        self.assertLess(lefts[1], lefts[0])
+        self.assertLess(lefts[2], lefts[1])
+        self.assertLess(lefts[3], lefts[0])
+
+    def test_signature_width_regression_for_mixed_digit_date(self) -> None:
+        document = Document()
+        date = "2026年8月28日印发"
+        classifications = add_text(document, f"示例标题\n正文。\n某测试单位办公室\n{date}")
+        output = self.root / "signature-width-regression.docx"
+        finalize(document, output, load_preset(), classifications, [])
+        formatted = Document(output)
+        section = formatted.sections[-1]
+        available = section.page_width.twips - section.left_margin.twips - section.right_margin.twips
+        paragraph = formatted.paragraphs[-1]
+        region = available - int(paragraph._p.pPr.ind.get(qn("w:left")))
+        self.assertEqual(paragraph.text, date)
+        self.assertGreater(region, 152 * 20)  # Previous output's under-sized region.
+        self.assertGreaterEqual(region, (len(date) + 2) * 16 * 20)
+        self.assertEqual(paragraph.runs[0].font.size.pt, 16)
+        self.assertEqual(len(paragraph._p.findall('.//' + qn('w:br'))), 0)
+
+    def test_signature_width_reserves_fullwidth_budget_and_proportional_headroom(self) -> None:
+        available = 12000
+        for text in ("2026年8月28日印发", "2026年12月28日印发", "２０２６年８月２８日印发", "WWW事务协调办公室"):
+            with self.subTest(text=text):
+                region = available - signature_indent_twips([text], 16, available)
+                self.assertGreaterEqual(region, (len(text) + 2) * 16 * 20)
+        region = available - signature_indent_twips(["某" * 20], 16, available)
+        self.assertGreaterEqual(region, 23 * 16 * 20)
+        self.assertEqual(signature_indent_twips(["某" * 50], 16, available), 0)
+
+    def test_signature_width_ignores_combining_and_zero_width_marks(self) -> None:
+        self.assertEqual(signature_indent_twips(["e\u0301单位"], 16, 10000), signature_indent_twips(["é单位"], 16, 10000))
+        self.assertEqual(signature_indent_twips(["某\u200b单位"], 16, 10000), signature_indent_twips(["某单位"], 16, 10000))
+
+    def test_signature_reformat_reuses_one_blank_and_preserves_suffix(self) -> None:
+        for suffix in ("", "印发", "印发。"):
+            for combined in (False, True):
+                with self.subTest(suffix=suffix, combined=combined):
+                    document = Document()
+                    for text in ["示例标题", "正文。", "", ""]:
+                        document.add_paragraph(text)
+                    if combined:
+                        document.add_paragraph(f"某单位办公室\n2026年8月28日{suffix}")
+                    else:
+                        document.add_paragraph("某单位办公室")
+                        document.add_paragraph(f"2026年8月28日{suffix}")
+                    output = self.root / "signature-repeat.docx"
+                    for _ in range(2):
+                        finalize(document, output, load_preset(), classify_paragraphs(document), [])
+                        document = Document(output)
+                        self.assertEqual([p.text for p in document.paragraphs], [
+                            "示例标题", "", "正文。", "", "某单位办公室", f"2026年8月28日{suffix}",
+                        ])
+
+    def test_long_signature_expands_to_text_width_without_negative_indent(self) -> None:
+        document = Document()
+        classifications = add_text(document, "示例标题\n正文。\n[落款]" + "示例" * 25 + "办公室\n[落款]某年某月某日")
+        output = self.root / "long-signature.docx"
+        finalize(document, output, load_preset(), classifications, [])
+        for p in Document(output).paragraphs[-3:]:
+            self.assertEqual(p._p.pPr.ind.get(qn("w:left")), "0")
+
+    def test_retired_colophon_map_preserves_non_signature_content(self) -> None:
+        document = Document()
+        document.add_paragraph("示例标题")
+        document.add_paragraph("正文。")
+        p = document.add_paragraph("抄送：某单位。")
+        p.alignment = WD_ALIGN_PARAGRAPH.RIGHT
+        p.runs[0].font.size = Pt(12)
+        p.runs[0].font.color.rgb = RGBColor(31, 78, 121)
+        before = p._p.xml
+        classifications = classify_paragraphs(document)
+        classifications[-1]["role"] = "colophon"
+        output = self.root / "retired-map.docx"
+        finalize(document, output, load_preset(), classifications, [])
+        self.assertEqual(classifications[-1]["role"], "skip")
+        self.assertEqual(Document(output).paragraphs[-1]._p.xml, before)
+
+    def test_validator_rejects_fixed_signature_indent_and_duplicate_spacing(self) -> None:
+        document = Document()
+        classifications = add_text(document, "示例标题\n正文。\n某单位办公室 2026年8月28日印发")
+        output = self.root / "signature-bad-geometry.docx"
+        finalize(document, output, load_preset(), classifications, [])
+        document = Document(output)
+        document.paragraphs[-1]._p.pPr.ind.set(qn("w:leftChars"), "2600")
+        spacer = document.paragraphs[-3]._p
+        spacer.addprevious(deepcopy(spacer))
+        document.save(output)
+        scrub_docx(output)
+        report = validate_document(output, load_preset())
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("right-side block positioning" in error for error in report["errors"]))
+        self.assertTrue(any("more than one preceding blank" in error for error in report["errors"]))
 
     def test_existing_document_preserves_table_and_picture(self) -> None:
         source = self.root / "source.docx"

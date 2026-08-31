@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import sys
 import tempfile
+import unicodedata
 from pathlib import Path
 from typing import Any
 
@@ -14,8 +16,6 @@ PRESET_PATH = SKILL_ROOT / "assets" / "presets" / "generic_official_v1.json"
 STATE_NAME = "official-document-formatting"
 ALIGNMENT_VALUES = {"left", "center", "right", "justify"}
 PRINT_MODE_VALUES = {"single", "duplex"}
-SIGNATURE_LEFT_TWIPS = 6160
-SIGNATURE_LEFT_CHARS = 2800
 STYLE_FIELDS = {
     "font_cn",
     "font_fallback",
@@ -104,10 +104,30 @@ def active_profile(extra_override: dict[str, Any] | None = None) -> dict[str, An
 
 
 def signature_style_spec(profile: dict[str, Any]) -> dict[str, Any]:
-    """Use body typography while fixing the signature block geometry."""
+    """Use body typography with centered, unindented signature lines."""
     spec = copy.deepcopy(profile["styles"]["body"])
     spec.update({"alignment": "center", "first_line_chars": 0, "space_before_pt": 0})
     return spec
+
+
+def signature_indent_twips(lines: list[str], size_pt: float, available_twips: int) -> int:
+    """Conservatively reserve the longest line plus rendering headroom.
+
+    Budget one em per visible character, including digits/Latin punctuation:
+    half-em ASCII estimates can underfit mixed-script office dates. Add 15%
+    headroom (at least two em) for font substitution and layout differences.
+    This is a portable estimate, not a guarantee of a rendered single line.
+    """
+    def width_em(text: str) -> float:
+        return sum(
+            0 if unicodedata.category(char) in {"Mn", "Me", "Cf"} else
+            4 if char == "\t" else 1
+            for char in text.strip()
+        )
+    longest = max((width_em(part) for line in lines for part in line.splitlines()), default=0)
+    headroom = max(2.0, longest * 0.15)
+    width = math.ceil((longest + headroom) * size_pt * 20)
+    return max(0, available_twips - width)
 
 
 def validate_override(override: dict[str, Any], schema: dict[str, Any] | None = None, prefix: str = "") -> None:

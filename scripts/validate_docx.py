@@ -12,14 +12,12 @@ from docx.oxml.ns import qn
 from lxml import etree
 
 from common import (
-    SIGNATURE_LEFT_CHARS,
-    SIGNATURE_LEFT_TWIPS,
     active_profile,
     configure_utf8_stdio,
     read_json,
     signature_style_spec,
 )
-from inspect_docx import analyze_tables, classify_paragraphs
+from inspect_docx import analyze_tables, classify_paragraphs, is_spacing_paragraph, signature_left_indents, split_signature_text, title_block_layout
 
 
 STYLE_ROLES = {
@@ -30,7 +28,7 @@ STYLE_ROLES = {
     "ODF Reference Note": "reference_note",
     "ODF Description": "description",
     "ODF Signature": "signature",
-    "ODF Colophon": "colophon",
+    "ODF Colophon": "skip",
 }
 ROLE_STYLES = {role: style for style, role in STYLE_ROLES.items() if role not in {"colophon", "skip"}}
 ALIGNMENTS = {
@@ -83,6 +81,7 @@ def validate_font_only(
     errors: list[str],
     expected_bold: bool | None = None,
 ) -> None:
+    validate_widow_control(paragraph, label, errors)
     for run in (run for run in paragraph.runs if run.text):
         if expected_bold is not None and run.font.bold is not expected_bold:
             errors.append(f"{label} has an incorrect bold setting")
@@ -91,12 +90,18 @@ def validate_font_only(
             break
 
 
+def validate_widow_control(paragraph, label: str, errors: list[str]) -> None:
+    if paragraph.paragraph_format.widow_control is not False:
+        errors.append(f"{label} must explicitly disable widow/orphan control")
+
+
 def validate_black_only(paragraph, label: str, errors: list[str]) -> None:
     if any(run.text and not run_color_is_black(run) for run in paragraph.runs):
         errors.append(f"{label} is not black")
 
 
 def validate_paragraph(paragraph, index: int, role: str, spec: dict, global_bold: bool, errors: list[str]) -> None:
+    validate_widow_control(paragraph, f"Paragraph {index} ({role})", errors)
     p_pr = paragraph._p.pPr
     spacing = p_pr.spacing if p_pr is not None else None
     line = int(spacing.get(qn("w:line"))) / 20 if spacing is not None and spacing.get(qn("w:line")) else None
@@ -126,7 +131,7 @@ def validate_paragraph(paragraph, index: int, role: str, spec: dict, global_bold
             break
 
 
-def validate_signature_paragraph(paragraph, index: int, profile: dict, errors: list[str]) -> None:
+def validate_signature_paragraph(paragraph, index: int, profile: dict, errors: list[str], expected_left: int) -> None:
     spec = signature_style_spec(profile)
     validate_paragraph(paragraph, index, "signature", spec, profile["global"]["bold"], errors)
     p_pr = paragraph._p.pPr
@@ -134,10 +139,14 @@ def validate_signature_paragraph(paragraph, index: int, profile: dict, errors: l
     left = int(ind.get(qn("w:left"))) if ind is not None and ind.get(qn("w:left")) else None
     left_chars = int(ind.get(qn("w:leftChars"))) if ind is not None and ind.get(qn("w:leftChars")) else None
     first_line = int(ind.get(qn("w:firstLine"))) if ind is not None and ind.get(qn("w:firstLine")) else 0
-    if left != SIGNATURE_LEFT_TWIPS or left_chars != SIGNATURE_LEFT_CHARS:
+    if left != expected_left or left_chars is not None:
         errors.append(f"Paragraph {index} (signature) has incorrect right-side block positioning")
     if first_line != 0:
         errors.append(f"Paragraph {index} (signature) has an incorrect first-line indent")
+    if split_signature_text(paragraph.text) is not None:
+        errors.append(f"Paragraph {index} (signature) must separate the office and date into two paragraphs")
+    if ind is not None and any(ind.get(qn(f"w:{attr}")) not in {None, "0"} for attr in ("right", "rightChars", "hanging", "hangingChars")):
+        errors.append(f"Paragraph {index} (signature) has unexpected right or hanging indentation")
 
 
 def validate_tables(document: Document, table_specs: list[dict], profile: dict, errors: list[str]) -> None:
@@ -217,11 +226,14 @@ def validate_document(
     )
     title_indices = sorted(index for index, role in expected_roles.items() if role == "main_title")
     for index in title_indices:
-        spacer_index = index + 1
-        if spacer_index >= len(document.paragraphs) or document.paragraphs[spacer_index].text.strip():
-            errors.append(f"Paragraph {index} (main_title) is not followed by a blank line")
+        end_index, blanks = title_block_layout(document, expected_roles, index)
+        spacer_index = end_index + 1
+        if spacer_index not in blanks:
+            errors.append(f"Title/description block at paragraph {index} is not followed by a blank line")
         elif expected_roles.get(spacer_index) != "body":
-            errors.append(f"Paragraph {index} (main_title) blank line is not body-formatted")
+            errors.append(f"Title/description block at paragraph {index} blank line is not body-formatted")
+        if any(blank != spacer_index for blank in blanks):
+            errors.append(f"Title/description block at paragraph {index} has misplaced or duplicate blank lines")
 
     signature_content = sorted(
         index
@@ -231,22 +243,25 @@ def validate_document(
     if signature_content:
         first_signature = signature_content[0]
         spacer_index = first_signature - 1
-        if spacer_index < 0 or document.paragraphs[spacer_index].text.strip():
+        if spacer_index < 0 or not is_spacing_paragraph(document.paragraphs[spacer_index]):
             errors.append(f"Paragraph {first_signature} (signature) is not preceded by a blank line")
         elif expected_roles.get(spacer_index) != "signature":
             errors.append(f"Paragraph {first_signature} (signature) blank line is not signature-formatted")
+        if spacer_index > 0 and is_spacing_paragraph(document.paragraphs[spacer_index - 1]):
+            if document.paragraphs[spacer_index - 1]._p.getnext() is document.paragraphs[spacer_index]._p:
+                errors.append(f"Paragraph {first_signature} (signature) has more than one preceding blank line")
 
+    signature_indents = signature_left_indents(document, profile, expected_roles)
     for index, paragraph in enumerate(document.paragraphs):
         if index in table_title_indexes:
             continue
         role = expected_roles.get(index)
-        if role == "colophon":
-            validate_font_only(paragraph, f"Paragraph {index} (colophon)", profile["styles"]["body"], errors)
-            warnings.append("Colophon structure was preserved; only fonts and text color were normalized")
+        if role in {"skip", "colophon"}:
+            continue
         elif role == "signature":
             if classifications is not None and paragraph.style.name != ROLE_STYLES[role]:
                 errors.append(f"Paragraph {index} ({role}) is missing its managed style")
-            validate_signature_paragraph(paragraph, index, profile, errors)
+            validate_signature_paragraph(paragraph, index, profile, errors, signature_indents[index])
         elif role in profile["styles"]:
             if classifications is not None and paragraph.style.name != ROLE_STYLES[role]:
                 errors.append(f"Paragraph {index} ({role}) is missing its managed style")
@@ -281,6 +296,9 @@ def validate_document(
             if text != "— 1 —":
                 errors.append("Page-number decoration is incorrect")
             paragraph = root.find(".//w:p", namespaces={"w": W_NS})
+            widow = paragraph.find("./w:pPr/w:widowControl", namespaces={"w": W_NS}) if paragraph is not None else None
+            if widow is None or widow.get(qn("w:val"), "1") not in {"0", "false", "off"}:
+                errors.append("Page-number paragraph must explicitly disable widow/orphan control")
             jc = paragraph.find("./w:pPr/w:jc", namespaces={"w": W_NS}) if paragraph is not None else None
             if jc is not None:
                 footer_alignments.add(jc.get(qn("w:val"), ""))
