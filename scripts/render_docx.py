@@ -7,6 +7,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from common import configure_utf8_stdio
+
 
 def libreoffice_render(source: Path, output: Path, executable: str) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -63,4 +65,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     main()

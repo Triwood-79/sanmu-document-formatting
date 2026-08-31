@@ -14,7 +14,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Cm, Mm, Pt, RGBColor
 
-from common import active_profile, choose_output_path, read_json, unique_output_path
+from common import active_profile, choose_output_path, configure_utf8_stdio, read_json, unique_output_path
 from inspect_docx import analyze_tables, classify_paragraphs, inspect_document
 from privacy_scrub import scrub_docx
 from validate_docx import validate_document
@@ -489,6 +489,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     arguments = build_parser().parse_args()
     try:
         arguments.func(arguments)

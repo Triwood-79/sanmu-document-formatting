@@ -9,6 +9,8 @@ from pathlib import Path
 
 from lxml import etree
 
+from common import configure_utf8_stdio
+
 
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 CT_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -92,4 +94,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     main()

@@ -9,6 +9,7 @@ from pathlib import Path
 from common import (
     active_profile,
     active_record,
+    configure_utf8_stdio,
     deep_merge,
     flatten,
     load_preset,
@@ -168,6 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     arguments = build_parser().parse_args()
     try:
         arguments.func(arguments)

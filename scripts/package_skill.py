@@ -6,6 +6,7 @@ import re
 import zipfile
 from pathlib import Path
 
+from common import configure_utf8_stdio
 from privacy_scan import scan_path
 
 
@@ -61,4 +62,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     main()

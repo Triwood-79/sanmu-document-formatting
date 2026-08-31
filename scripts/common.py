@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,14 @@ CONFIGURABLE_EXACT_PATHS = {
     "page_number.size_pt",
     "page_number.bold",
 }
+
+
+def configure_utf8_stdio() -> None:
+    """Keep CLI JSON readable when an agent captures output on Windows."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="replace")
 
 
 def read_json(path: Path) -> dict[str, Any]:

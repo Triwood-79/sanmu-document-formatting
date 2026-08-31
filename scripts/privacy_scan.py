@@ -6,6 +6,8 @@ import re
 import zipfile
 from pathlib import Path
 
+from common import configure_utf8_stdio
+
 
 TEXT_SUFFIXES = {".md", ".txt", ".json", ".yaml", ".yml", ".py", ".ps1", ".toml", ".xml", ".rels"}
 IGNORED_PARTS = {".git", "__pycache__", ".pytest_cache", ".mypy_cache", "dist"}
@@ -79,4 +81,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     main()

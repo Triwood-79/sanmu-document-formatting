@@ -13,6 +13,8 @@ from docx.oxml.ns import qn
 from docx.table import Table
 from docx.text.paragraph import Paragraph
 
+from common import configure_utf8_stdio
+
 
 H1_RE = re.compile(r"^[一二三四五六七八九十百]+、")
 H2_RE = re.compile(r"^（[一二三四五六七八九十百]+）")
@@ -222,4 +224,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     main()

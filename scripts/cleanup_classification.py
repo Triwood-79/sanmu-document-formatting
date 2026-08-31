@@ -7,6 +7,8 @@ import json
 import stat
 from pathlib import Path
 
+from common import configure_utf8_stdio
+
 
 ALLOWED_ROLES = {
     "main_title",
@@ -114,4 +116,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     main()

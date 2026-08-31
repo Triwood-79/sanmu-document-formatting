@@ -73,6 +73,19 @@ class SkillTests(unittest.TestCase):
         self.assertTrue(profile["global"]["bold"])
         self.assertNotIn("colophon", profile["styles"])
 
+    def test_cli_forces_utf8_output_even_when_python_defaults_to_gbk(self) -> None:
+        env = self.env.copy()
+        env["PYTHONIOENCODING"] = "gbk"
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS / "profile_manager.py"), "view"],
+            env=env,
+            capture_output=True,
+            check=True,
+        )
+        output = result.stdout.decode("utf-8")
+        self.assertIn("宋体", output)
+        self.assertEqual(json.loads(output)["profile"]["page_number"]["font_cn"], "宋体")
+
     def test_profile_draft_confirmation_and_restore(self) -> None:
         self.run_script("profile_manager.py", "begin", "--fresh")
         self.run_script("profile_manager.py", "set", "page.margins_cm.top", "4.0")
@@ -285,6 +298,55 @@ class SkillTests(unittest.TestCase):
         self.assertIn(run_east_asia_font(body_run), {"方正仿宋_GBK", "仿宋_GB2312", "仿宋GB2312", "FangSong_GB2312", "FangSong"})
         self.assertTrue(all(run_color(run) == "000000" for run in (title_run, header1_run, header2_run, body_run)))
         self.assertTrue(all(run.font.bold for run in (title_run, header1_run, header2_run, body_run)))
+
+    def test_table_roles_follow_disabled_global_bold(self) -> None:
+        source = self.root / "two-level-table-no-bold.docx"
+        document = Document()
+        document.add_paragraph("示例公文标题")
+        document.add_paragraph("这是表格前的正文。")
+        table_title = document.add_paragraph("测试任务安排表")
+        table_title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        table = document.add_table(rows=3, cols=2)
+        table.cell(0, 0).merge(table.cell(0, 1)).text = "第一层表头"
+        table.cell(1, 0).text = "第二层甲"
+        table.cell(1, 1).text = "第二层乙"
+        table.cell(2, 0).text = "正文甲"
+        table.cell(2, 1).text = "正文乙"
+        document.save(source)
+
+        inspection = inspect_document(source)
+        self.assertEqual(inspection["tables"][0]["title_paragraph_index"], 2)
+        self.assertEqual(inspection["tables"][0]["header_rows"], 2)
+        mapping = self.root / "two-level-table-no-bold-map.json"
+        mapping.write_text(
+            json.dumps({"classifications": inspection["classifications"], "tables": inspection["tables"]}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        overrides = self.root / "no-bold-overrides.json"
+        overrides.write_text(json.dumps({"global": {"bold": False}}), encoding="utf-8")
+        output = self.root / "two-level-table-no-bold-formatted.docx"
+        self.run_script(
+            "docx_engine.py",
+            "format-existing",
+            "--input",
+            source,
+            "--output",
+            output,
+            "--classification",
+            mapping,
+            "--overrides",
+            overrides,
+            "--confirmed",
+        )
+
+        formatted = Document(output)
+        runs = (
+            formatted.paragraphs[2].runs[0],
+            formatted.tables[0].cell(0, 0).paragraphs[0].runs[0],
+            formatted.tables[0].cell(1, 0).paragraphs[0].runs[0],
+            formatted.tables[0].cell(2, 0).paragraphs[0].runs[0],
+        )
+        self.assertTrue(all(run.font.bold is False for run in runs))
 
     def test_classification_cleanup_requires_confirmation_and_matching_hash(self) -> None:
         source = self.root / "cleanup-source.docx"

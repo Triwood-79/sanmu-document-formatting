@@ -11,7 +11,7 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from lxml import etree
 
-from common import active_profile, read_json
+from common import active_profile, configure_utf8_stdio, read_json
 from inspect_docx import analyze_tables, classify_paragraphs
 
 
@@ -289,4 +289,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     main()
