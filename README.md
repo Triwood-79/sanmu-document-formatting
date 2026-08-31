@@ -13,7 +13,7 @@
 ### 一行命令安装
 
 ```bash
-npx -y skills add https://github.com/Triwood-79/official-document-formatting -g --skill sanmu-document-formatting --copy
+npx -y skills add https://github.com/Triwood-79/sanmu-document-formatting -g --skill sanmu-document-formatting --copy
 ```
 
 安装器会检测本机已有的 Agent，并让你选择安装目标。该命令需要 Node.js；`-g` 表示安装到用户级目录，`--copy` 可以避免 Windows 符号链接权限问题。
@@ -22,7 +22,7 @@ npx -y skills add https://github.com/Triwood-79/official-document-formatting -g 
 
 ```text
 帮我安装三木公文排版 Skill（sanmu-document-formatting）：
-https://github.com/Triwood-79/official-document-formatting
+https://github.com/Triwood-79/sanmu-document-formatting
 
 请安装到当前 Agent 的个人 Skills 目录。若已存在同名 Skill，请先告诉我，不要直接覆盖。
 ```
@@ -200,4 +200,4 @@ python scripts/privacy_scan.py .
 
 ## 反馈
 
-如果遇到结构识别、排版结果或安装问题，可以在 [GitHub Issues](https://github.com/Triwood-79/official-document-formatting/issues) 中提交。
+如果遇到结构识别、排版结果或安装问题，可以在 [GitHub Issues](https://github.com/Triwood-79/sanmu-document-formatting/issues) 中提交。
