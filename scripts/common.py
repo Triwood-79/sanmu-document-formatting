@@ -13,6 +13,7 @@ from typing import Any
 
 SKILL_ROOT = Path(__file__).resolve().parents[1]
 PRESET_PATH = SKILL_ROOT / "assets" / "presets" / "generic_official_v1.json"
+# Keep the storage key stable across skill renames so profiles, drafts and history survive.
 STATE_NAME = "official-document-formatting"
 ALIGNMENT_VALUES = {"left", "center", "right", "justify"}
 PRINT_MODE_VALUES = {"single", "duplex"}

@@ -1,9 +1,9 @@
 ---
-name: official-document-formatting
+name: sanmu-document-formatting
 description: Create or reformat Chinese official-document DOCX files with a configurable general preset. Use for generating Word documents, standardizing an existing .docx, or viewing and changing the persistent formatting profile; do not use for legacy .doc/.docm files or substantive fact creation.
 ---
 
-# 通用公文排版
+# 三木公文排版
 
 Use this skill to create or reformat `.docx` files without Microsoft Word. Use the deterministic scripts for document changes; do not reproduce their OOXML logic manually.
 

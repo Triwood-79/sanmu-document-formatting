@@ -836,8 +836,41 @@ class SkillTests(unittest.TestCase):
         with zipfile.ZipFile(output) as archive:
             names = archive.namelist()
         self.assertTrue(names)
-        self.assertTrue(all(name.startswith("official-document-formatting/") for name in names))
-        self.assertIn("official-document-formatting/SKILL.md", names)
+        self.assertTrue(all(name.startswith("sanmu-document-formatting/") for name in names))
+        self.assertIn("sanmu-document-formatting/SKILL.md", names)
+
+    def test_renamed_package_preserves_existing_profile_draft_and_history(self) -> None:
+        legacy_state = Path(self.env["CODEX_HOME"]) / "state" / "official-document-formatting"
+        history = legacy_state / "history"
+        history.mkdir(parents=True)
+        record = {"schema_version": 1, "base_profile": load_preset()["profile_id"],
+                  "overrides": {"styles": {"body": {"line_spacing_pt": 28}}}}
+        draft = deepcopy(record)
+        draft["overrides"]["styles"]["body"]["line_spacing_pt"] = 29
+        for path, value in ((legacy_state / "active.json", record),
+                            (legacy_state / "draft.json", draft),
+                            (history / "profile-example.json", record)):
+            path.write_text(json.dumps(value), encoding="utf-8")
+        before = {path: path.read_bytes() for path in legacy_state.rglob("*.json")}
+        output = self.root / "renamed.zip"
+        self.run_script("package_skill.py", "--output", output)
+        with zipfile.ZipFile(output) as archive:
+            archive.extractall(self.root / "installed")
+        manager = self.root / "installed" / "sanmu-document-formatting" / "scripts" / "profile_manager.py"
+
+        def installed_command(command: str) -> dict:
+            result = subprocess.run([sys.executable, str(manager), command], env=self.env,
+                                    capture_output=True, text=True, encoding="utf-8", check=True)
+            return json.loads(result.stdout)
+
+        current = installed_command("view")
+        self.assertEqual(current["source"], "user_profile")
+        self.assertEqual(current["profile"]["styles"]["body"]["line_spacing_pt"], 28)
+        self.assertEqual(installed_command("diff")["changes"],
+                         [{"field": "styles.body.line_spacing_pt", "current": 28, "proposed": 29}])
+        self.assertEqual(installed_command("history")["history"][0]["record"], record)
+        self.assertEqual({path: path.read_bytes() for path in legacy_state.rglob("*.json")}, before)
+        self.assertFalse((legacy_state.parent / "sanmu-document-formatting").exists())
 
     def test_legacy_extension_and_tracked_changes_are_blocked(self) -> None:
         document = Document()

@@ -1,6 +1,6 @@
 interface:
-  display_name: "通用公文排版"
+  display_name: "三木公文排版"
   short_description: "生成或重新排版符合通用预设规范的中文公文 DOCX 文档"
-  default_prompt: "Use $official-document-formatting to format this content as a DOCX document."
+  default_prompt: "Use $sanmu-document-formatting to format this content as a DOCX document."
 policy:
   allow_implicit_invocation: true

@@ -1,4 +1,4 @@
-# 通用公文排版 Skill
+# 三木公文排版
 
 把纯文本、Markdown 或已有 DOCX 整理成排版统一的 Word 文档。你只需要把文字或文件交给 AI Agent，并说明想做什么，不需要会写代码。
 
@@ -13,7 +13,7 @@
 ### 一行命令安装
 
 ```bash
-npx -y skills add https://github.com/Triwood-79/official-document-formatting -g --skill official-document-formatting --copy
+npx -y skills add https://github.com/Triwood-79/official-document-formatting -g --skill sanmu-document-formatting --copy
 ```
 
 安装器会检测本机已有的 Agent，并让你选择安装目标。该命令需要 Node.js；`-g` 表示安装到用户级目录，`--copy` 可以避免 Windows 符号链接权限问题。
@@ -21,7 +21,7 @@ npx -y skills add https://github.com/Triwood-79/official-document-formatting -g 
 ### 也可以直接发给你的 Agent
 
 ```text
-帮我安装通用公文排版 Skill：
+帮我安装三木公文排版 Skill（sanmu-document-formatting）：
 https://github.com/Triwood-79/official-document-formatting
 
 请安装到当前 Agent 的个人 Skills 目录。若已存在同名 Skill，请先告诉我，不要直接覆盖。
@@ -30,10 +30,10 @@ https://github.com/Triwood-79/official-document-formatting
 安装完成后，可以直接说：
 
 ```text
-使用通用公文排版 Skill，把这份 DOCX 检查并重新排版。
+使用三木公文排版，把这份 DOCX 检查并重新排版。
 ```
 
-若当前 Agent 支持 `$skill-name` 显式调用，也可以使用 `$official-document-formatting`。已经安装过的话，重新运行安装命令即可更新。
+若当前 Agent 支持 `$skill-name` 显式调用，也可以使用 `$sanmu-document-formatting`。已经安装过的话，重新运行安装命令即可更新。
 
 ## 它能做什么
 
@@ -52,7 +52,7 @@ Microsoft Word 不是核心排版的必需条件。运行前会检查 Python 和
 ### 把文字生成 Word 文档
 
 ```text
-使用 $official-document-formatting，把下面的内容生成排版后的 Word 文档。
+使用 $sanmu-document-formatting，把下面的内容生成排版后的 Word 文档。
 只做结构识别和排版，不改写、补写或删减正文。
 ```
 
@@ -73,7 +73,7 @@ Microsoft Word 不是核心排版的必需条件。运行前会检查 Python 和
 ### 重新排版已有 DOCX
 
 ```text
-使用 $official-document-formatting，检查并重新排版这份 DOCX。
+使用 $sanmu-document-formatting，检查并重新排版这份 DOCX。
 先展示标题、正文、说明内容和表格的识别结果，等我确认后再处理，不要覆盖原文件。
 ```
 
@@ -88,11 +88,11 @@ Microsoft Word 不是核心排版的必需条件。运行前会检查 Python 和
 ### 临时改一次格式
 
 ```text
-使用 $official-document-formatting 处理这份文档。
+使用 $sanmu-document-formatting 处理这份文档。
 这一次改成单面打印，正文固定行距 28 pt；不要保存为长期设置。
 ```
 
-如果当前 Agent 不使用 `$skill-name` 语法，把 `$official-document-formatting` 换成“通用公文排版 Skill”即可。
+如果当前 Agent 不使用 `$skill-name` 语法，把 `$sanmu-document-formatting` 换成“三木公文排版”即可。
 
 ## 改成自己的固定格式
 
@@ -160,8 +160,10 @@ Skill 不会自动下载或捆绑字体。
 重新运行安装命令，或者执行：
 
 ```bash
-npx -y skills update official-document-formatting -g
+npx -y skills update sanmu-document-formatting -g
 ```
+
+如果此前安装的是 `official-document-formatting`，确认新版可用后再移除旧名 Skill，避免重复加载；已保存的个人格式继续沿用。
 
 ### 换一台电脑还能使用原来的设置吗？
 

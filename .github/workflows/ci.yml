@@ -32,4 +32,4 @@ jobs:
       - name: Build release archive
         run: python scripts/package_skill.py
       - name: Scan release archive
-        run: python scripts/privacy_scan.py dist/official-document-formatting.zip
+        run: python scripts/privacy_scan.py dist/sanmu-document-formatting.zip
