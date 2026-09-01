@@ -290,7 +290,9 @@ def validate_document(
         for data in footer_parts:
             root = etree.fromstring(data)
             field = root.find(".//w:fldSimple", namespaces={"w": W_NS})
-            if field is None or "PAGE" not in field.get(qn("w:instr"), ""):
+            simple_instruction = field.get(qn("w:instr"), "") if field is not None else ""
+            complex_instructions = root.xpath(".//w:instrText/text()", namespaces={"w": W_NS})
+            if "PAGE" not in simple_instruction and not any("PAGE" in item for item in complex_instructions):
                 continue
             text = "".join(root.xpath(".//w:t/text()", namespaces={"w": W_NS}))
             if text != "— 1 —":
@@ -302,12 +304,23 @@ def validate_document(
             jc = paragraph.find("./w:pPr/w:jc", namespaces={"w": W_NS}) if paragraph is not None else None
             if jc is not None:
                 footer_alignments.add(jc.get(qn("w:val"), ""))
-            r_pr = field.find(".//w:rPr", namespaces={"w": W_NS})
+            if field is not None:
+                r_pr = field.find(".//w:rPr", namespaces={"w": W_NS})
+            else:
+                result_runs = root.xpath(
+                    ".//w:r[w:t='1']",
+                    namespaces={"w": W_NS},
+                )
+                r_pr = result_runs[0].find("./w:rPr", namespaces={"w": W_NS}) if result_runs else None
             r_fonts = r_pr.find("./w:rFonts", namespaces={"w": W_NS}) if r_pr is not None else None
-            east_asia = r_fonts.get(qn("w:eastAsia")) if r_fonts is not None else None
             allowed_page_fonts = {page_spec["font_cn"], page_spec["font_fallback"]} | FONT_ALIASES.get(page_spec["font_fallback"], set())
-            if east_asia not in allowed_page_fonts:
-                errors.append("Page number has an unexpected font")
+            for font_slot in ("eastAsia", "ascii", "hAnsi", "cs"):
+                actual_font = r_fonts.get(qn(f"w:{font_slot}")) if r_fonts is not None else None
+                if actual_font not in allowed_page_fonts:
+                    errors.append(f"Page number has an unexpected {font_slot} font")
+            hint = r_pr.find("./w:hint", namespaces={"w": W_NS}) if r_pr is not None else None
+            if hint is None or hint.get(qn("w:val")) != "eastAsia":
+                errors.append("Page number must use the East Asian font hint")
             size = r_pr.find("./w:sz", namespaces={"w": W_NS}) if r_pr is not None else None
             actual_half_points = int(size.get(qn("w:val"))) if size is not None and size.get(qn("w:val")) else None
             if actual_half_points != round(page_spec["size_pt"] * 2):
@@ -322,6 +335,16 @@ def validate_document(
             for run in paragraph.findall(".//w:r", namespaces={"w": W_NS}) if paragraph is not None else []:
                 if not run.findall(".//w:t", namespaces={"w": W_NS}):
                     continue
+                run_r_pr = run.find("./w:rPr", namespaces={"w": W_NS})
+                run_fonts = run_r_pr.find("./w:rFonts", namespaces={"w": W_NS}) if run_r_pr is not None else None
+                for font_slot in ("eastAsia", "ascii", "hAnsi", "cs"):
+                    actual_font = run_fonts.get(qn(f"w:{font_slot}")) if run_fonts is not None else None
+                    if actual_font not in allowed_page_fonts:
+                        errors.append(f"Page-number run has an unexpected {font_slot} font")
+                        break
+                run_hint = run_r_pr.find("./w:hint", namespaces={"w": W_NS}) if run_r_pr is not None else None
+                if run_hint is None or run_hint.get(qn("w:val")) != "eastAsia":
+                    errors.append("Page-number run must use the East Asian font hint")
                 run_color = run.find("./w:rPr/w:color", namespaces={"w": W_NS})
                 if run_color is None or run_color.get(qn("w:val"), "").upper() != "000000":
                     errors.append("Page-number decoration is not black")

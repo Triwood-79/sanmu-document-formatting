@@ -17,10 +17,12 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml.ns import qn
 from docx.oxml import OxmlElement
 from docx.shared import Pt, RGBColor
+from lxml import etree
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 sys.path.insert(0, str(SCRIPTS))
 
 from common import active_profile, load_preset, signature_indent_twips  # noqa: E402
@@ -129,6 +131,55 @@ class SkillTests(unittest.TestCase):
         profile["page_number"]["bold"] = False
         report = validate_document(output, profile)
         self.assertTrue(report["valid"], report["errors"])
+
+    def test_page_number_digits_force_the_page_font_in_every_ooxml_slot(self) -> None:
+        output = self.root / "page-number-song.docx"
+        self.run_script("docx_engine.py", "create", "--text", "# 示例标题\n正文。", "--output", output)
+        allowed_fonts = {"宋体", "SimSun"}
+
+        with zipfile.ZipFile(output) as archive:
+            footer_parts = [
+                archive.read(name)
+                for name in archive.namelist()
+                if name.startswith("word/footer") and name.endswith(".xml")
+            ]
+
+        self.assertTrue(footer_parts)
+        for data in footer_parts:
+            root = etree.fromstring(data)
+            text_runs = root.findall(".//w:r[w:t]", namespaces={"w": W_NS})
+            self.assertTrue(text_runs)
+            for run in text_runs:
+                r_pr = run.find("./w:rPr", namespaces={"w": W_NS})
+                self.assertIsNotNone(r_pr)
+                r_fonts = r_pr.find("./w:rFonts", namespaces={"w": W_NS})
+                self.assertIsNotNone(r_fonts)
+                slot_fonts = {
+                    r_fonts.get(qn(f"w:{slot}"))
+                    for slot in ("eastAsia", "ascii", "hAnsi", "cs")
+                }
+                self.assertEqual(len(slot_fonts), 1)
+                self.assertTrue(slot_fonts.issubset(allowed_fonts))
+                self.assertNotIn("Times New Roman", slot_fonts)
+                hint = r_pr.find("./w:hint", namespaces={"w": W_NS})
+                self.assertIsNotNone(hint)
+                self.assertEqual(hint.get(qn("w:val")), "eastAsia")
+
+        corrupted = self.root / "page-number-times-new-roman.docx"
+        with zipfile.ZipFile(output) as source, zipfile.ZipFile(corrupted, "w") as target:
+            for item in source.infolist():
+                data = source.read(item.filename)
+                if item.filename.startswith("word/footer") and item.filename.endswith(".xml"):
+                    root = etree.fromstring(data)
+                    field_fonts = root.find(".//w:r[w:t='1']/w:rPr/w:rFonts", namespaces={"w": W_NS})
+                    self.assertIsNotNone(field_fonts)
+                    field_fonts.set(qn("w:ascii"), "Times New Roman")
+                    field_fonts.set(qn("w:hAnsi"), "Times New Roman")
+                    data = etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+                target.writestr(item, data)
+        report = validate_document(corrupted, load_preset())
+        self.assertFalse(report["valid"])
+        self.assertTrue(any("font" in error.lower() for error in report["errors"]))
 
     def test_create_and_validate_duplex_document(self) -> None:
         output = self.root / "generated.docx"

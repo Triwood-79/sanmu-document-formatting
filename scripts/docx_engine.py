@@ -121,6 +121,38 @@ def set_rfonts(run_or_font, east_asia: str, latin: str) -> None:
     r_fonts.set(qn("w:cs"), latin)
 
 
+def set_east_asia_font_hint(run) -> None:
+    r_pr = run._element.get_or_add_rPr()
+    hint = r_pr.find(qn("w:hint"))
+    if hint is None:
+        hint = OxmlElement("w:hint")
+        r_pr.append(hint)
+    hint.set(qn("w:val"), "eastAsia")
+
+
+def page_number_rpr(spec: dict, font_name: str):
+    r_pr = OxmlElement("w:rPr")
+    r_fonts = OxmlElement("w:rFonts")
+    for attr in ("eastAsia", "ascii", "hAnsi", "cs"):
+        r_fonts.set(qn(f"w:{attr}"), font_name)
+    r_pr.append(r_fonts)
+    hint = OxmlElement("w:hint")
+    hint.set(qn("w:val"), "eastAsia")
+    r_pr.append(hint)
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "000000")
+    r_pr.append(color)
+    bold = OxmlElement("w:b")
+    bold.set(qn("w:val"), "1" if spec["bold"] else "0")
+    r_pr.append(bold)
+    size_value = str(round(spec["size_pt"] * 2))
+    for tag in ("w:sz", "w:szCs"):
+        size = OxmlElement(tag)
+        size.set(qn("w:val"), size_value)
+        r_pr.append(size)
+    return r_pr
+
+
 def set_run_black(run) -> None:
     run.font.color.rgb = RGBColor(0, 0, 0)
     color = run._element.get_or_add_rPr().find(qn("w:color"))
@@ -269,37 +301,39 @@ def add_page_field(paragraph, spec: dict, font_name: str) -> None:
     paragraph.paragraph_format.first_line_indent = None
     paragraph.paragraph_format.space_before = Pt(0)
     paragraph.paragraph_format.space_after = Pt(0)
+    p_pr = paragraph._p.get_or_add_pPr()
+    existing_paragraph_r_pr = p_pr.find(qn("w:rPr"))
+    if existing_paragraph_r_pr is not None:
+        p_pr.remove(existing_paragraph_r_pr)
+    p_pr.append(page_number_rpr(spec, font_name))
     left = paragraph.add_run("— ")
-    field = OxmlElement("w:fldSimple")
-    field.set(qn("w:instr"), "PAGE")
-    field_run = OxmlElement("w:r")
-    field_text = OxmlElement("w:t")
-    field_text.text = "1"
-    field_run.append(field_text)
-    field.append(field_run)
-    paragraph._p.append(field)
+    field_begin = paragraph.add_run()
+    begin = OxmlElement("w:fldChar")
+    begin.set(qn("w:fldCharType"), "begin")
+    begin.set(qn("w:dirty"), "true")
+    field_begin._r.append(begin)
+    field_instruction = paragraph.add_run()
+    instruction = OxmlElement("w:instrText")
+    instruction.set(qn("xml:space"), "preserve")
+    instruction.text = " PAGE \\* CHARFORMAT "
+    field_instruction._r.append(instruction)
+    field_separator = paragraph.add_run()
+    separator = OxmlElement("w:fldChar")
+    separator.set(qn("w:fldCharType"), "separate")
+    field_separator._r.append(separator)
+    field_result = paragraph.add_run("1")
+    field_end = paragraph.add_run()
+    end = OxmlElement("w:fldChar")
+    end.set(qn("w:fldCharType"), "end")
+    field_end._r.append(end)
     right = paragraph.add_run(" —")
-    for run in (left, right):
+    for run in (left, field_begin, field_instruction, field_separator, field_result, field_end, right):
         run.font.name = font_name
         run.font.size = Pt(spec["size_pt"])
         run.font.bold = spec["bold"]
         set_rfonts(run, font_name, font_name)
+        set_east_asia_font_hint(run)
         set_run_black(run)
-    r_pr = OxmlElement("w:rPr")
-    r_fonts = OxmlElement("w:rFonts")
-    for attr in ("eastAsia", "ascii", "hAnsi", "cs"):
-        r_fonts.set(qn(f"w:{attr}"), font_name)
-    r_pr.append(r_fonts)
-    color = OxmlElement("w:color")
-    color.set(qn("w:val"), "000000")
-    r_pr.append(color)
-    if spec["bold"]:
-        bold = OxmlElement("w:b")
-        r_pr.append(bold)
-    size = OxmlElement("w:sz")
-    size.set(qn("w:val"), str(round(spec["size_pt"] * 2)))
-    r_pr.append(size)
-    field_run.insert(0, r_pr)
 
 
 def set_footer(document: Document, profile: dict, font_name: str) -> None:

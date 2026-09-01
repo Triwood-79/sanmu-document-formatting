@@ -33,7 +33,17 @@ https://github.com/Triwood-79/sanmu-document-formatting
 使用三木公文排版，把这份 DOCX 检查并重新排版。
 ```
 
-若当前 Agent 支持 `$skill-name` 显式调用，也可以使用 `$sanmu-document-formatting`。已经安装过的话，重新运行安装命令即可更新。
+若当前 Agent 支持 `$skill-name` 显式调用，也可以使用 `$sanmu-document-formatting`。
+
+### 已安装？这样更新
+
+在终端运行：
+
+```bash
+npx -y skills update sanmu-document-formatting -g
+```
+
+也可以重新运行上面的一行安装命令，并选择原来的安装目标。更新 Skill 不会改动已保存的个人排版格式。
 
 ## 它能做什么
 
@@ -46,6 +56,18 @@ https://github.com/Triwood-79/sanmu-document-formatting
 | 本地校验与清理 | 输出后清理常见文档元数据，并检查页面、字体、段落、表格和页码结构。 |
 
 Microsoft Word 不是核心排版的必需条件。运行前会检查 Python 和所需组件，发现缺少时会先说明情况并等待确认。安装 Word 或 LibreOffice 后，Agent 可以进一步渲染文档并进行视觉检查；没有渲染器时，只能报告结构验证结果。
+
+## 效果展示
+
+以下为同一份测试文档的排版前后对比，示例内容为虚构测试信息，仅用于展示排版效果。
+
+<p align="center">
+  <img src="./assets/examples/before.png" alt="排版前" width="49%">
+  <img src="./assets/examples/after.png" alt="排版后" width="49%">
+</p>
+<p align="center">排版前（左）｜排版后（右）</p>
+
+主要变化包括：主标题与标题层级统一、内置字体和字号生效、正文段落与固定行距规范化、落款位置调整，以及页码格式统一。
 
 ## 直接这样用
 
@@ -167,8 +189,6 @@ Skill 不会自动下载或捆绑字体。
 ```bash
 npx -y skills update sanmu-document-formatting -g
 ```
-
-如果此前安装的是 `official-document-formatting`，确认新版可用后再移除旧名 Skill，避免重复加载；已保存的个人格式继续沿用。
 
 ### 换一台电脑还能使用原来的设置吗？
 
